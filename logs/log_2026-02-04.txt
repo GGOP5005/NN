@@ -1,0 +1,23 @@
+[14:41:25] [INFO] Iniciando leitura: CTE TCKU6040948.pdf
+[14:41:28] [ERRO] FALHA ao processar 'CTE TCKU6040948.pdf': Falha Crítica na IA (Cota Esgotada ou Erro Técnico)
+[14:41:28] [AVISO] Arquivo movido para pasta de ERROS para análise manual.
+[14:52:06] [INFO] Iniciando leitura: CTE TCKU6040948.pdf
+[14:52:33] [SUCESSO] Sucesso! 'CTE TCKU6040948.pdf' processado e arquivado.
+[16:39:43] [INFO] Iniciando leitura: CTE TCKU6040948.pdf
+[16:40:15] [SUCESSO] Sucesso! 'CTE TCKU6040948.pdf' processado e arquivado.
+[17:05:53] [INFO] Iniciando leitura: CTE TCKU6040948.pdf
+[17:06:23] [SUCESSO] Sucesso! 'CTE TCKU6040948.pdf' processado e arquivado.
+[17:12:31] [INFO] Iniciando leitura: CTE TCKU6040948.pdf
+[17:12:56] [SUCESSO] Sucesso! 'CTE TCKU6040948.pdf' processado e arquivado.
+[17:18:57] [INFO] Iniciando leitura: CTE TCKU6040948.pdf
+[17:19:23] [SUCESSO] Sucesso! 'CTE TCKU6040948.pdf' processado e arquivado.
+[17:20:32] [INFO] Iniciando leitura: CTE TCKU6040948.pdf
+[17:20:56] [SUCESSO] Sucesso! 'CTE TCKU6040948.pdf' processado e arquivado.
+[17:28:21] [INFO] Iniciando leitura: CTE TCKU6040948.pdf
+[17:28:44] [SUCESSO] Sucesso! 'CTE TCKU6040948.pdf' processado e arquivado.
+[17:35:27] [INFO] Iniciando leitura: CTE TCKU6040948.pdf
+[17:35:56] [SUCESSO] Sucesso! 'CTE TCKU6040948.pdf' processado e arquivado.
+[17:40:13] [INFO] Iniciando leitura: CTE TCKU6040948.pdf
+[17:40:35] [SUCESSO] Sucesso! 'CTE TCKU6040948.pdf' processado e arquivado.
+[18:01:53] [INFO] Iniciando leitura: CTE TCKU6040948.pdf
+[18:02:19] [SUCESSO] Sucesso! 'CTE TCKU6040948.pdf' processado e arquivado.

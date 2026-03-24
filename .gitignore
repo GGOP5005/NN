@@ -1,0 +1,34 @@
+# Pastas Gigantes e Compiladas
+build/
+dist/
+__pycache__/
+
+# Sessões de Robôs e I.A.
+Bsoft_Session/
+Logs_Bsoft/
+sessao_whatsapp/
+WA_Session/
+JARVIS_CEREBRO/
+
+# Entradas e Saídas do Dropbox
+entrada_*/
+entrada_manaus/
+entrada_pecem/
+entrada_salvador/
+entrada_santos/
+entrada_suape/
+
+# Ficheiros Fiscais e Mídia
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.xlsx
+*.csv
+*.doc
+*.docx
+
+# Credenciais e Banco de Dados Local
+.env
+credentials.json
+*memoria*.json
