@@ -16,13 +16,12 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 dotenv_path = os.path.join(BASE_DIR, '.env')
 load_dotenv(dotenv_path)
 
-LISTA_CHAVES_GEMINI = [
-    "AIzaSyDdWKkSd02f-YnvJHohjufItZo2KKd4nzg", 
-    "AIzaSyAz6HKWtWJwOsOVIpS8KFbLqiCFZ9vv0rw",                 
-    "AIzaSyATV3MDPLs5CkuqQQYzYRfDhjww7m-W4yM",
-    "AIzaSyAOqeOeo2VS127yheGnUbCocPDnSR6JpVk",
-    "AIzaSyCgEPaLBUDfEcc5Xonxwo4f25ttW-97uM"
+# Carrega dinamicamente as 10 chaves do arquivo .env
+chaves_brutas = [
+    os.environ.get(f"GEMINI_KEY_{i}") for i in range(1, 11)
 ]
+# Filtra apenas as chaves que realmente existem e não estão vazias
+LISTA_CHAVES_GEMINI = [k.strip() for k in chaves_brutas if k and k.strip()]
 
 TECON_CPF = os.environ.get("TECON_CPF")
 TECON_SENHA = os.environ.get("TECON_SENHA")
@@ -39,7 +38,9 @@ DROPBOX_DIR = r"C:\Users\supor\Dropbox\Norte Nordeste\FILA_DE_PROCESSAMENTO"
 PASTA_ERROS = os.path.join(DROPBOX_DIR, "00_ERROS_DE_LEITURA")
 
 ano_atual = datetime.now().year
-PASTA_RAIZ_DOCUMENTOS = os.path.join(os.path.dirname(DROPBOX_DIR), f"DOCUMENTAÇÃO DE ENTREGA SUAPE {ano_atual}")
+
+# O Organizador de Meses agora entende que a raiz do Dropbox é C:\Users\supor\Dropbox\Norte Nordeste
+PASTA_RAIZ_DOCUMENTOS = os.path.dirname(DROPBOX_DIR)
 
 ROTEAMENTO_PORTOS = {
     os.path.join(DROPBOX_DIR, "entrada_manaus"): "1ekdnK1eGvJrSkY8trB4683TMUxI0CZml1xL3PEG5uXo",
