@@ -8,23 +8,18 @@ from playwright.sync_api import sync_playwright
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 
+# Imports diretos da arquitetura plana
 from config import BASE_DIR, PLANILHA_ID, HEADLESS
 
 init(autoreset=True)
 
-# --- CONFIGURAÇÃO GOOGLE SHEETS ---
 CREDS_PATH = os.path.join(BASE_DIR, "credentials.json")
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 def limpar_tela():
     os.system('cls' if os.name == 'nt' else 'clear')
 
-# CORREÇÃO BUG 5: get_col_letter correta - versão antiga usava chr(65+idx)
-# que só funcionava até a coluna Z (índice 25). Se DEADLINE estiver em AA ou além, gerava letra errada.
 def get_col_letter(idx):
-    """Converte índice numérico (base 0) para letra de coluna Excel.
-    Ex: 0='A', 25='Z', 26='AA', 27='AB', 51='AZ', 52='BA'
-    """
     result = ""
     n = idx + 1
     while n > 0:
@@ -32,25 +27,17 @@ def get_col_letter(idx):
         result = chr(65 + remainder) + result
     return result
 
-# ==========================================================
-# TRATAMENTO DE TEXTO AVANÇADO (ANTI-FALHAS)
-# ==========================================================
 def super_limpar(texto):
-    """Remove espaços, acentos e transforma O em 0, I em 1"""
     t = re.sub(r'[^A-Z0-9]', '', str(texto).upper())
     t = t.replace('O', '0').replace('I', '1')
     return t
 
 def limpar_viagem(viagem_texto):
-    """Remove letras de direção (N, S, E, W) do final da viagem para igualar site e planilha"""
     t = super_limpar(viagem_texto)
     if len(t) > 2 and t[-1] in ['N', 'S', 'E', 'W']:
         t = t[:-1]
     return t
 
-# ==========================================================
-# 1. RASPAGEM DA PROGRAMAÇÃO DO TECON
-# ==========================================================
 def raspar_programacao_tecon():
     print(Fore.WHITE + "🌐 Acessando a Programação de Navios do Tecon Suape...")
     navios_site = []
@@ -64,7 +51,6 @@ def raspar_programacao_tecon():
             page.wait_for_selector("table tbody tr", timeout=15000)
             time.sleep(3) 
             
-            # Lê as colunas pela posição matemática real (Ignora a coluna fantasma)
             dados = page.evaluate("""() => {
                 const linhas = Array.from(document.querySelectorAll('table tbody tr'));
                 return linhas.map(tr => {
@@ -77,7 +63,6 @@ def raspar_programacao_tecon():
                     let navio_val = cols[9].innerText.trim();
                     let viagem_val = cols[10].innerText.trim();
                     
-                    // Fallback de segurança: Se o ETB estiver vazio, pega o ATA
                     if (etb_val === "-" || etb_val === "") {
                         etb_val = ata_val;
                     }
@@ -96,7 +81,6 @@ def raspar_programacao_tecon():
             print(Fore.CYAN + "\n📋 --- NAVIOS LIDOS NO SITE ---")
             for item in dados:
                 etb_formatado = item['etb']
-                # Transforma "13/03 08:00" em "13/03/2026 08:00" injetando o ano atual
                 if re.match(r'^\d{2}/\d{2}\s+\d{2}:\d{2}$', etb_formatado):
                     partes = etb_formatado.split(' ')
                     etb_formatado = f"{partes[0]}/{ano_atual} {partes[1]}"
@@ -119,9 +103,6 @@ def raspar_programacao_tecon():
         finally:
             browser.close()
 
-# ==========================================================
-# 2. ATUALIZAÇÃO DA PLANILHA
-# ==========================================================
 def processar_planilha_e_atualizar(navios_site):
     if not navios_site:
         return
@@ -159,8 +140,6 @@ def processar_planilha_e_atualizar(navios_site):
             print(Fore.RED + "❌ A coluna 'DEADLINE' não foi encontrada no cabeçalho!")
             return
 
-        # CORREÇÃO BUG 5: usa get_col_letter corrigida em vez de chr(65 + idx_deadline)
-        # que só funcionava até a coluna Z
         col_letra_deadline = get_col_letter(idx_deadline)
         atualizacoes_batch = []
         navios_atualizados = 0
@@ -169,17 +148,15 @@ def processar_planilha_e_atualizar(navios_site):
             linha_real = i + 1
             if linha_real == 1: continue 
             
-            # 🛡️ TRAVA ANTI-COLETA: Se a coluna de monitoramento tiver a palavra "COLETA", não altera o deadline.
             if idx_monitoramento != -1 and len(linha) > idx_monitoramento:
                 status_monitoramento = str(linha[idx_monitoramento]).upper().strip()
                 if "COLETA" in status_monitoramento:
-                    continue # Pula silenciosamente, preservando a data original da coleta
+                    continue 
             
             if len(linha) > idx_navio:
                 navio_planilha = str(linha[idx_navio]).strip()
                 
                 if navio_planilha:
-                    # Gera as Chaves Universais da Planilha
                     chave_planilha = super_limpar(navio_planilha)
                     chave_viagem_planilha = limpar_viagem(navio_planilha)
                     
@@ -188,12 +165,10 @@ def processar_planilha_e_atualizar(navios_site):
                     navio_match_nome = ""
                     
                     for n_site in navios_site:
-                        # Gera as Chaves Universais do Site
                         n_site_clean = super_limpar(n_site['navio_nome'])
                         v_site_clean = limpar_viagem(n_site['viagem'])
                         v_site_sem_zero = v_site_clean.lstrip('0')
                         
-                        # VERIFICAÇÃO 100% BLINDADA E CRUZADA
                         if n_site_clean in chave_planilha:
                             if v_site_clean in chave_viagem_planilha or (v_site_sem_zero and v_site_sem_zero in chave_viagem_planilha):
                                 match_encontrado = True
@@ -222,9 +197,6 @@ def processar_planilha_e_atualizar(navios_site):
     except Exception as e:
         print(Fore.RED + f"❌ Erro ao atualizar a planilha: {e}")
 
-# ==========================================================
-# 3. CICLO DE EXECUÇÃO E AGENDAMENTO
-# ==========================================================
 def iniciar_missao_navios():
     print(Fore.BLUE + "\n" + "="*70)
     print(Fore.YELLOW + Style.BRIGHT + f" 🚢 INICIANDO VARREDURA DE NAVIOS ({datetime.now().strftime('%H:%M:%S')})")

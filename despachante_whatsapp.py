@@ -29,6 +29,7 @@ except ImportError:
     print(Fore.RED + "❌ Bibliotecas de áudio ausentes! Execute no terminal: pip install SpeechRecognition pydub")
     sys.exit()
 
+# Imports diretos da arquitetura plana
 from config import BASE_DIR, PLANILHA_ID, LISTA_CHAVES_GEMINI, ROTEAMENTO_PORTOS
 from buscador_pdfs import encontrar_pasta_container
 from sheets_api import executar_com_resiliencia_infinita, MAPA_MESES, get_col_letter
@@ -49,11 +50,8 @@ CONTATOS_DIRETORIA = [
     "Rivaldo - Norte Nordeste"
 ]
 
-# CORREÇÃO BUG 7: Cache da aba com controle de mês para invalidação automática
-# Antes: ABA_CACHEADA nunca era limpa, então se o robô ligasse em março
-# e ficasse rodando até abril, continuava lendo/escrevendo na aba de março
 ABA_CACHEADA = None
-MES_ABA_CACHEADA = None  # Guarda o mês em que a aba foi cacheada
+MES_ABA_CACHEADA = None  
 MODELO_CEREBRO_CACHE = None
 
 def obter_modelo_cerebro(client):
@@ -72,11 +70,10 @@ def obter_modelo_cerebro(client):
 # 🛡️ ESTERILIZADOR DE TEXTO (ANTI-ERRO DO WORD)
 # ==========================================================
 def limpar_texto_word(texto):
-    """Remove emojis, quebras de linha e caracteres invisíveis que travam o Word."""
     if not texto: return ""
     t = str(texto).replace('\n', ' ').replace('\r', ' ')
-    t = ''.join(c for c in t if c <= '\uFFFF') # Remove emojis
-    t = ''.join(c for c in t if unicodedata.category(c)[0] != 'C') # Remove controle
+    t = ''.join(c for c in t if c <= '\uFFFF')
+    t = ''.join(c for c in t if unicodedata.category(c)[0] != 'C')
     return t.upper().strip()
 
 # ==========================================================
@@ -132,7 +129,6 @@ def gerar_documento_proposta(cliente, cnpj, origem, destino, valor, att, advalor
         data_atual = datetime.now().strftime("%d/%m/%Y")
         data_validade = (datetime.now() + timedelta(days=30)).strftime("%d/%m/%Y")
         
-        # Limpeza severa de variáveis
         cliente_c = limpar_texto_word(cliente)
         cnpj_c = limpar_texto_word(cnpj)
         
@@ -213,8 +209,6 @@ def gerar_ordem_coleta(empresa, container, di, lote, bl, motorista, cpf, cavalo,
     
     if "VAL" in empresa_upper or "MOTOS" in empresa_upper:
         nome_arq_base = "VAL_MOTOS"
-        # CORREÇÃO BUG 1: Nome correto do template com underscore entre VAL e MOTOS
-        # Antes: "TEMPLATE_COLETA_VALMOTOS.docx" (sem underscore) — arquivo não existia
         caminho_template = os.path.join(BASE_DIR, "TEMPLATE_COLETA_VAL_MOTOS.docx")
         substituicoes = {
             "[DI]": limpar_texto_word(di), "[LOTE]": limpar_texto_word(lote), "[BL]": limpar_texto_word(bl),
@@ -309,13 +303,10 @@ def limpar_tela():
 def obter_aba_atual(service):
     global ABA_CACHEADA, MES_ABA_CACHEADA
     
-    # CORREÇÃO BUG 7: Invalida o cache quando o mês muda
-    # Antes: ABA_CACHEADA era verificada apenas uma vez e nunca limpa
     mes_agora = datetime.now().month
     if ABA_CACHEADA and MES_ABA_CACHEADA == mes_agora:
         return ABA_CACHEADA
     
-    # Mês mudou ou primeira execução: busca a aba correta
     aba_alvo = {
         1: "JANEIRO", 2: "FEVEREIRO", 3: "MARÇO", 4: "ABRIL",
         5: "MAIO", 6: "JUNHO", 7: "JULHO", 8: "AGOSTO",
@@ -325,7 +316,6 @@ def obter_aba_atual(service):
     try:
         meta = executar_com_resiliencia_infinita(service.spreadsheets().get(spreadsheetId=PLANILHA_ID))
         abas = [s["properties"]["title"].upper() for s in meta.get("sheets", [])]
-        # Aceita MARCO como sinônimo de MARÇO
         if aba_alvo == "MARÇO" and "MARÇO" not in abas and "MARCO" in abas:
             aba_alvo = "MARCO"
         ABA_CACHEADA = aba_alvo if aba_alvo in abas else abas[0]
@@ -397,7 +387,7 @@ def consultar_gemini(nome_remetente, pergunta_diretoria, contexto_planilhas, cam
     hora_atual = datetime.now().strftime("%H:%M")
 
     prompt = f"""
-    Você é o Jarvis, a Inteligência Artificial Executiva da Norte Nordeste (Empresa de Logística).
+    Você é a Delta, a Inteligência Artificial Executiva da Norte Nordeste (Empresa de Logística).
     Seu papel é responder perguntas da diretoria de forma educada, proativa e com precisão absoluta.
     
     👤 QUEM ESTÁ PERGUNTANDO: {nome_remetente}
@@ -424,7 +414,7 @@ def consultar_gemini(nome_remetente, pergunta_diretoria, contexto_planilhas, cam
     🛡️ REGRAS DE OURO:
     1. PROATIVIDADE: Sempre informe: *Contêiner, Cliente, Destino e Motorista*.
     2. INVISIBILIDADE: NUNCA escreva a palavra "REGISTRO" na resposta.
-    3. TOM DE VOZ: Seja educado e aja como o Jarvis. 
+    3. TOM DE VOZ: Seja educado e aja como a Delta. 
     4. PROIBIDO INVENTAR: Trabalhe APENAS com os dados da BASE DE DADOS.
     5. VISÃO COMPUTACIONAL: Caso eu tenha enviado uma IMAGEM, RECIBO, NOTA FISCAL ou PDF anexo, analise a imagem e responda a pergunta extraindo as informações precisas do documento.
     6. PROIBIDO TEXTO EXTRA NOS COMANDOS: Se a sua resposta for para criar Proposta, Apresentação ou Ordem de Coleta, envie APENAS E EXATAMENTE a linha do comando. Não escreva "Excelente", não dê bom dia. SÓ o comando.
@@ -538,15 +528,16 @@ def despachante_continuo():
         try:
             print(Fore.WHITE + "⏳ A carregar o WhatsApp Web...")
             page.goto("https://web.whatsapp.com/", timeout=120000)
-            page.wait_for_selector('div[contenteditable="true"][data-tab="3"]', timeout=300000)
+            
+            # --- 🛠️ CORREÇÃO DA VISÃO AQUI: Mudámos de div para input! ---
+            page.wait_for_selector('input[data-tab="3"], div[contenteditable="true"][data-tab="3"]', timeout=300000)
             print(Fore.GREEN + "✅ WhatsApp Conectado e Pronto!\n")
             time.sleep(2)
             
             variacoes_ia = r'IA|I\.A\.?|YA|Y\.A\.?|HIA|ÍA|Í\.A\.?|IH AH|I A|IÁ|I\.Á|EA|E\.A\.?|IY|IYA|IAH|YAH|IHA|JÁ|JA|YÁ|IH|YH|HYA|IIA|IAA|I AH|E AH|E A|IE|I\.E|Y E|YE|YHA|LÁ|LA|EIA|EYA|ILHA|I\.H\.A|Y\.H\.A|I\.Y\.A|I\.E\.A|I\.A\.H|I E A|I E O|I O|I U|Y O'
-            variacoes_jarvis = r'JARVIS|JAVIS|JARBES|JARVES|JARVYS|JAVES|JARVI|JABES|JABIS|JAVIZ|JARVIZ|DIARVIS|DJARVIS|TCHARVIS|TJARVIS|YARVIS|YAVIS|JHARVIS|CHARLES|CHAVES|JÁRVIS|XARVIS|XARBES|TCHARLES|GARVIS|GARVES|GARBES|JARIS|JARYS|JARB|JAVI|JAVE|YARVES|YARBES|DJARVES|DIARVES|TCHARVES|CHARVIS|CHARVES|JALVIS|JALVES|JÁVIS|JÁVES|JÁBES|TIARVIS|JHARVES|GABES|GAVIS|MARVIS|MARVES|Jáfes|Javich|Jáfis|JOGOS|JOGO'
+            variacoes_jarvis = r'JARVIS|JAVIS|JARBES|JARVES|JARVYS|JAVES|JARVI|JABES|JABIS|JAVIZ|JARVIZ|DIARVIS|DJARVIS|TCHARVIS|TJARVIS|YARVIS|YAVIS|JHARVIS|CHARLES|CHAVES|JÁRVIS|XARVIS|XARBES|TCHARLES|GARVIS|GARVES|GARBES|JARIS|JARYS|JARB|JAVI|JAVE|YARVES|YARBES|DJARVES|DIARVES|TCHARVES|CHARVIS|CHARVES|JALVIS|JALVES|JÁVIS|JÁVES|JÁBES|TIARVIS|JHARVES|GABES|GAVIS|MARVIS|MARVES|Jáfes|Javich|Jáfis|DELTA|JOGOS|JOGO'
             padrao_gatilho = re.compile(rf'^({variacoes_ia}|{variacoes_jarvis})\b[\s,.:;-]*', re.IGNORECASE)
 
-            # Helper para extrair anexos usando clique direito
             def extrair_anexo(msg_node, page_ref):
                 try:
                     msg_node.hover()
@@ -580,7 +571,9 @@ def despachante_continuo():
                 for contato in CONTATOS_DIRETORIA:
                     try:
                         print(Fore.WHITE + f"   🔎 Verificando: {contato}...")
-                        busca = page.locator('div[contenteditable="true"][data-tab="3"]')
+                        
+                        # --- 🛠️ CORREÇÃO DO SELETOR: Mudámos de div para input ---
+                        busca = page.locator('input[data-tab="3"], div[contenteditable="true"][data-tab="3"]').first
                         busca.fill("")
                         time.sleep(0.5)
                         busca.fill(contato)
@@ -609,7 +602,6 @@ def despachante_continuo():
                                     if msg_id != msg_antiga:
                                         ultimas_mensagens_ia[contato] = msg_id
                                         
-                                        # Apenas recusa continuar se a ÚLTIMA mensagem for do robô
                                         if is_ultima_nossa:
                                             print(Fore.WHITE + f"   ⏭️ Sincronizado: O último pedido de {contato} já foi respondido.")
                                             continue
@@ -625,7 +617,6 @@ def despachante_continuo():
                                         caminho_anexo = None
                                         is_audio = False
                                         
-                                        # Verifica se a última mensagem é mídia
                                         is_audio_html = ultima_in.locator('span[data-icon="audio-play"], span[data-icon="ptt-status"], span[data-icon="audio-download"], audio').count() > 0
                                         is_audio_regex = bool(re.search(r'\d{1,2}:\d{2}\s*\d[.,]\d[xX×]?', texto_puro_tela))
                                         
@@ -652,7 +643,6 @@ def despachante_continuo():
                                                 print(Fore.CYAN + "   📸 Imagem/Documento detectado na última mensagem!")
                                                 caminho_anexo = extrair_anexo(ultima_in, page)
                                                 
-                                        # Se não achou mídia na última, olha APENAS a mídia da anterior (NÃO o texto)
                                         if not is_audio and not caminho_anexo and len(mensagens_in) >= 2:
                                             msg_anterior = mensagens_in[-2]
                                             tem_midia_ant = msg_anterior.locator('img, span[data-icon="document"]').count() > 0
@@ -660,9 +650,6 @@ def despachante_continuo():
                                                 print(Fore.CYAN + "   📸 Imagem/Documento detectado na mensagem anterior!")
                                                 caminho_anexo = extrair_anexo(msg_anterior, page)
 
-                                        # =======================================================
-                                        # 🔥 FLUXO DE EXECUÇÃO
-                                        # =======================================================
                                         if texto_para_processar:
                                             gatilho_ativado = False
                                             pergunta_limpa = ""
@@ -702,7 +689,7 @@ def despachante_continuo():
                                                 if "COMANDO_APRESENTACAO||" in resposta_ia:
                                                     caminho_apres = os.path.join(BASE_DIR, "APRESENTACAO_COMERCIAL.pdf")
                                                     if not os.path.exists(caminho_apres):
-                                                        caixa_texto_envio.fill(f"🤖 *Jarvis*\nDesculpe {nome_pessoa}, não encontrei o ficheiro 'APRESENTACAO_COMERCIAL.pdf'.")
+                                                        caixa_texto_envio.fill(f"🤖 *Delta*\nDesculpe {nome_pessoa}, não encontrei o ficheiro 'APRESENTACAO_COMERCIAL.pdf'.")
                                                         page.keyboard.press('Enter')
                                                     else:
                                                         try:
@@ -713,10 +700,9 @@ def despachante_continuo():
                                                             time.sleep(3)
                                                             page.locator('span[data-icon="send"], span[data-icon="wds-ic-send-filled"]').first.click(timeout=10000)
                                                             time.sleep(3)
-                                                            caixa_texto_envio.fill(f"🤖 *Jarvis*\n\n✅ {nome_pessoa}, aqui está a nossa Apresentação Comercial Oficial!")
+                                                            caixa_texto_envio.fill(f"🤖 *Delta*\n\n✅ {nome_pessoa}, aqui está a nossa Apresentação Comercial Oficial!")
                                                             page.keyboard.press('Enter')
                                                         except Exception as e:
-                                                            # CORREÇÃO BUG 16: loga o erro em vez de silenciar
                                                             print(Fore.RED + f"      ❌ Erro ao enviar apresentação: {e}")
 
                                                 elif "COMANDO_PROPOSTA||" in resposta_ia:
@@ -737,7 +723,7 @@ def despachante_continuo():
                                                     if cliente_p != "ERRO":
                                                         caminho_doc_pdf, erro = gerar_documento_proposta(cliente_p, cnpj_p, origem_p, destino_p, valor_p, att_p, advaloren_p, triagem_p, pedagio_p, prazo_p)
                                                         if erro:
-                                                            caixa_texto_envio.fill(f"🤖 *Jarvis*\nErro: {erro}")
+                                                            caixa_texto_envio.fill(f"🤖 *Delta*\nErro: {erro}")
                                                             page.keyboard.press('Enter')
                                                         else:
                                                             try:
@@ -748,10 +734,9 @@ def despachante_continuo():
                                                                 time.sleep(3) 
                                                                 page.locator('span[data-icon="send"], span[data-icon="wds-ic-send-filled"]').first.click()
                                                                 time.sleep(3)
-                                                                caixa_texto_envio.fill(f"🤖 *Jarvis*\n\n✅ {nome_pessoa}, proposta gerada!")
+                                                                caixa_texto_envio.fill(f"🤖 *Delta*\n\n✅ {nome_pessoa}, proposta gerada!")
                                                                 page.keyboard.press('Enter')
                                                             except Exception as e:
-                                                                # CORREÇÃO BUG 16: loga o erro em vez de silenciar
                                                                 print(Fore.RED + f"      ❌ Erro ao enviar proposta: {e}")
 
                                                 elif "COMANDO_COLETA||" in resposta_ia:
@@ -771,7 +756,7 @@ def despachante_continuo():
                                                     if container_c != "ERRO":
                                                         caminho_coleta_pdf, erro_coleta = gerar_ordem_coleta(empresa_c, container_c, di_c, lote_c, bl_c, motorista_c, cpf_c, cavalo_c, carreta_c)
                                                         if erro_coleta:
-                                                            caixa_texto_envio.fill(f"🤖 *Jarvis*\nDesculpe {nome_pessoa}, ocorreu um erro interno: {erro_coleta}")
+                                                            caixa_texto_envio.fill(f"🤖 *Delta*\nDesculpe {nome_pessoa}, ocorreu um erro interno: {erro_coleta}")
                                                             page.keyboard.press('Enter')
                                                         else:
                                                             try:
@@ -783,18 +768,17 @@ def despachante_continuo():
                                                                 page.locator('span[data-icon="send"], span[data-icon="wds-ic-send-filled"]').first.click(timeout=10000)
                                                                 time.sleep(3)
                                                                 
-                                                                texto_final = f"🤖 *Jarvis (I.A. Norte Nordeste)*\n\n✅ {nome_pessoa}, a Ordem de Coleta do contêiner *{container_c}* ({empresa_c}) foi gerada com sucesso!\n\n🚚 Motorista: {motorista_c}\nPlacas: {cavalo_c} / {carreta_c}"
+                                                                texto_final = f"🤖 *Delta (I.A. Norte Nordeste)*\n\n✅ {nome_pessoa}, a Ordem de Coleta do contêiner *{container_c}* ({empresa_c}) foi gerada com sucesso!\n\n🚚 Motorista: {motorista_c}\nPlacas: {cavalo_c} / {carreta_c}"
                                                                 caixa_texto_envio.fill(texto_final)
                                                                 page.keyboard.press('Enter')
                                                             except Exception as e:
-                                                                # CORREÇÃO BUG 16: loga o erro em vez de silenciar
                                                                 print(Fore.RED + f"      ❌ Erro ao enviar ordem de coleta: {e}")
                                                     else:
-                                                        caixa_texto_envio.fill(f"🤖 *Jarvis*\n{nome_pessoa}, não consegui entender os dados do contêiner.")
+                                                        caixa_texto_envio.fill(f"🤖 *Delta*\n{nome_pessoa}, não consegui entender os dados do contêiner.")
                                                         page.keyboard.press('Enter')
 
                                                 else:
-                                                    texto_final = f"🤖 *Jarvis (I.A. Norte Nordeste)*\n\n{resposta_ia}"
+                                                    texto_final = f"🤖 *Delta (I.A. Norte Nordeste)*\n\n{resposta_ia}"
                                                     caixa_texto_envio.click()
                                                     page.keyboard.insert_text(texto_final)
                                                     time.sleep(0.5)
@@ -811,9 +795,6 @@ def despachante_continuo():
                     except Exception as e:
                         print(Fore.RED + f"   ⚠️ Erro ao verificar {contato}: {e}")
 
-                # ======================================================
-                # 🚚 FASE 2: DESPACHO DE DOCUMENTAÇÃO (A CADA ~1 MINUTO)
-                # ======================================================
                 ciclo_frota += 1
                 if ciclo_frota >= 4:
                     print(Fore.WHITE + f"\n🚚 [{agora}] Verificando despachos da frota...")
@@ -833,7 +814,7 @@ def despachante_continuo():
                                 except: pass
                                 continue
                                 
-                            busca = page.locator('div[contenteditable="true"][data-tab="3"]')
+                            busca = page.locator('input[data-tab="3"], div[contenteditable="true"][data-tab="3"]').first
                             busca.fill(grupo)
                             time.sleep(2)
                             grupo_loc = page.locator(f'span[title="{grupo}"]').first

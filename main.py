@@ -12,7 +12,6 @@ from watchdog.events import FileSystemEventHandler
 
 from config import ROTEAMENTO_PORTOS, PASTA_ERROS, DROPBOX_DIR
 from processor import processar_arquivo
-# Importa função de busca de contêiner por NF no cache da planilha
 from sheets_api import buscar_container_por_nf
 
 try:
@@ -90,12 +89,6 @@ def worker_processamento():
                     container = dados_json.get("CONTAINER", "").strip() if dados_json else ""
                     container_limpo = re.sub(r'[^A-Z0-9]', '', container)
 
-                    # ================================================================
-                    # FIX: NF chegou sem contêiner (ex: NF de CT-e multi-contêiner)
-                    # A planilha já tem a linha com NF + contêiner (criada pelo CT-e).
-                    # Buscamos o contêiner no cache da planilha pelo número da NF
-                    # para criar a pasta no lugar certo em vez de ir para SEM_CONTAINER.
-                    # ================================================================
                     if not container_limpo:
                         nf_para_busca = dados_json.get("NOTAS FISCAIS", "").strip() if dados_json else ""
                         if nf_para_busca:
@@ -176,7 +169,6 @@ def worker_processamento():
 
                     print(Fore.GREEN + f"📁 Guardado em: {caminho_visual}")
 
-                    # Resgate de órfãos: se agora temos o contêiner, move os arquivos de SEM_CONTAINER
                     if container_limpo:
                         if os.path.exists(pasta_orfaos) and pasta_orfaos != destino_porto_raiz:
                             arquivos_resgatados = 0
@@ -250,7 +242,6 @@ def worker_processamento():
             fila_arquivos.task_done()
             time.sleep(2)
 
-
 class MonitorPortosHandler(FileSystemEventHandler):
     def on_created(self, event):
         if event.is_directory: return
@@ -262,7 +253,6 @@ class MonitorPortosHandler(FileSystemEventHandler):
                 nome_porto = os.path.basename(pasta_pai).replace("entrada_", "").upper()
                 print(Fore.MAGENTA + f"📥 NOVO ARQUIVO DETECTADO EM {nome_porto}: {os.path.basename(caminho_arquivo)}")
                 fila_arquivos.put((caminho_arquivo, id_planilha, nome_porto))
-
 
 def varredura_inicial():
     print(Fore.YELLOW + "🔍 Realizando varredura de passivo...")
@@ -282,7 +272,6 @@ def varredura_inicial():
         print(Fore.GREEN + f"✅ {arquivos_encontrados} arquivo(s) encontrado(s) e adicionado(s) à fila.")
     else:
         print(Fore.WHITE + "✅ Nenhum arquivo passivo. Pastas limpas.")
-
 
 def main():
     limpar_tela()
@@ -315,7 +304,6 @@ def main():
         observer.stop()
     observer.join()
     print(Fore.RED + "Desligado.")
-
 
 if __name__ == "__main__":
     main()

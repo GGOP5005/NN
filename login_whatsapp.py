@@ -1,6 +1,8 @@
 import os
 from colorama import init, Fore, Style
 from playwright.sync_api import sync_playwright
+
+# Import direto da arquitetura plana
 from config import BASE_DIR
 
 init(autoreset=True)
@@ -28,7 +30,6 @@ def fazer_login_seguro():
         print(Fore.YELLOW + "⏳ Carregando a página de login...")
         page.goto("https://web.whatsapp.com/")
         
-        # O robô vai ficar parado aqui até você dar a ordem para fechar
         input(Fore.GREEN + Style.BRIGHT + "\n👉 Pressione ENTER AQUI NESTA TELA PRETA apenas DEPOIS que tiver escaneado o QR Code e as conversas aparecerem... ")
         
         print(Fore.YELLOW + "\nSalvando a memória da sua sessão e fechando...")

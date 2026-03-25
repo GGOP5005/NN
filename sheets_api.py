@@ -7,6 +7,7 @@ from datetime import datetime
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+
 from config import COLUNAS, BASE_DIR, ROTEAMENTO_PORTOS
 
 # --- CONFIGURAÇÃO ---
@@ -31,16 +32,10 @@ MAPA_MESES = {
     "NOVEMBRO": 11, "DEZEMBRO": 12,
 }
 
-# CORREÇÃO BUG 4: Função get_col_letter unificada e correta para qualquer índice
-# A fórmula antiga chr(64 + idx // 26) + chr(65 + idx % 26) era inconsistente
-# com a versão de sheets_suape.py e produzia letras erradas em alguns casos.
-# Esta versão funciona para A-Z (0-25) e AA-ZZ (26+) corretamente.
 def get_col_letter(idx):
-    """Converte índice numérico (base 0) para letra de coluna Excel.
-    Ex: 0='A', 25='Z', 26='AA', 27='AB', 51='AZ', 52='BA'
-    """
+    """Converte índice numérico (base 0) para letra de coluna Excel."""
     result = ""
-    n = idx + 1  # converte para base 1
+    n = idx + 1
     while n > 0:
         n, remainder = divmod(n - 1, 26)
         result = chr(65 + remainder) + result
@@ -94,11 +89,10 @@ def obter_limites_porto(spreadsheet_id):
                 config["idx_fim"] = 32
                 config["nome_porto"] = "pecem"
             elif "salvador" in p: 
-                # 🔥 FIX SALVADOR: Área de leitura e escrita exclusivamente de C a Z
                 config["col_max"] = "Z"
                 config["tamanho"] = 26
-                config["idx_inicio"] = 2  # Coluna C
-                config["idx_fim"] = 25    # Coluna Z
+                config["idx_inicio"] = 2
+                config["idx_fim"] = 25
                 config["nome_porto"] = "salvador"
             elif "santos" in p: 
                 config["nome_porto"] = "santos"
@@ -110,43 +104,6 @@ def obter_limites_porto(spreadsheet_id):
                 config["nome_porto"] = "suape_manaus"
             break
     return config
-
-def buscar_container_por_nf(spreadsheet_id, nf_numero):
-    """
-    Dado um número de NF, busca na planilha se já existe uma linha
-    que tenha essa NF E tenha um contêiner definido.
-    Retorna o contêiner encontrado (string) ou "" se não encontrar.
-
-    Usado pelo main.py para resolver o problema de ordem de chegada:
-    quando a NF chega ANTES do CT-e, vai para SEM_CONTAINER.
-    Quando o CT-e chega depois e preenche a linha com o contêiner,
-    na PRÓXIMA vez que uma NF chegar o sistema consegue encontrar
-    o contêiner correto pelo número da NF.
-
-    Também resolve o caso inverso: CT-e chega primeiro (com contêiner),
-    depois a NF chega sem contêiner — esta função encontra o contêiner
-    pela NF que já foi mesclada na linha.
-    """
-    if not nf_numero:
-        return ""
-
-    nf_limpa = str(nf_numero).strip().upper().lstrip("0")
-
-    try:
-        carregar_cache_inicial(spreadsheet_id)
-        for nome_aba, conteudo in CACHE_PLANILHA.get("dados", {}).items():
-            for item in conteudo.get("linhas", []):
-                nfs_linha = [x.strip().lstrip("0") for x in item.get("nf", "").replace(";", ",").split(",") if x.strip()]
-                if nf_limpa in nfs_linha:
-                    cont = item.get("container_limpo", "")
-                    if cont:
-                        print(f"    🔗 NF {nf_limpa} encontrada na planilha → Contêiner: {cont}")
-                        return cont
-    except Exception as e:
-        print(f"    ⚠️ Erro ao buscar contêiner por NF: {e}")
-
-    return ""
-
 
 def encontrar_indice_coluna(mapa_headers, chaves_possiveis):
     for chave in chaves_possiveis:
@@ -226,39 +183,20 @@ def carregar_cache_inicial(spreadsheet_id, forcar=False):
         print(f"    ❌ Erro crítico no Cache: {e}")
 
 def buscar_container_por_nf(spreadsheet_id, nf_numero):
-    """
-    Consulta o cache da planilha para encontrar o contêiner
-    associado a uma NF já registrada.
-
-    Usado pelo main.py quando a NF chega sem contêiner definido
-    (ex: NF individual de um CT-e multi-contêiner) — a planilha
-    já tem a linha com NF + contêiner criada pelo CT-e, então
-    recuperamos o contêiner daqui para criar a pasta correta.
-
-    Retorna: string do contêiner (ex: "MRKU2792430") ou "" se não achar.
-    """
     if not nf_numero:
         return ""
-
     nf_busca = str(nf_numero).strip().upper().lstrip("0")
-
-    # Garante que o cache está carregado para esta planilha
     carregar_cache_inicial(spreadsheet_id)
 
     for nome_aba, conteudo in CACHE_PLANILHA.get("dados", {}).items():
         for item in conteudo.get("linhas", []):
-            nfs_linha = [
-                x.strip().lstrip("0")
-                for x in item.get("nf", "").replace(";", ",").split(",")
-                if x.strip()
-            ]
+            nfs_linha = [x.strip().lstrip("0") for x in item.get("nf", "").replace(";", ",").split(",") if x.strip()]
             if nf_busca in nfs_linha:
                 container = item.get("container_limpo", "").strip()
                 if container:
                     print(f"    🔍 Contêiner recuperado da planilha para NF {nf_busca}: {container}")
                     return container
     return ""
-
 
 def adicionar_ou_mesclar_linha(spreadsheet_id, aba_padrao, dados_novos):
     global CACHE_PLANILHA
@@ -305,8 +243,7 @@ def adicionar_ou_mesclar_linha(spreadsheet_id, aba_padrao, dados_novos):
                 if nf_n:
                     nfs_planilha = [x.strip() for x in item.get("nf", "").replace(";", ",").split(",") if x.strip()]
                     nfs_novo = [x.strip() for x in nf_n.replace(";", ",").split(",") if x.strip()]
-                    if any(n in nfs_planilha for n in nfs_novo):
-                        match_nf = True
+                    if any(n in nfs_planilha for n in nfs_novo): match_nf = True
 
                 match_cte_armador = False
                 if cte_armador_n:
@@ -323,7 +260,6 @@ def adicionar_ou_mesclar_linha(spreadsheet_id, aba_padrao, dados_novos):
                 match_cont = cont_n_limpo != "" and (cont_n_limpo in item.get("container_limpo", ""))
                 match_lacre = lacre_n != "" and (lacre_n in item.get("lacre", ""))
                 match_booking = booking_n != "" and (booking_n in item.get("booking", ""))
-                
                 cliente_linha = item.get("cliente", "")
                 
                 if match_cont:
@@ -335,26 +271,9 @@ def adicionar_ou_mesclar_linha(spreadsheet_id, aba_padrao, dados_novos):
 
                 tem_container_na_linha = item.get("container_limpo", "") != ""
                 tem_container_novo = cont_n_limpo != ""
-                containers_diferentes = False
-                if tem_container_novo and tem_container_na_linha:
-                    if cont_n_limpo not in item.get("container_limpo", ""):
-                        containers_diferentes = True
-                        
-                colisao_container = (tem_container_novo and tem_container_na_linha and containers_diferentes)
+                colisao_container = (tem_container_novo and tem_container_na_linha and cont_n_limpo not in item.get("container_limpo", ""))
 
-                # ================================================================
-                # REGRA ANTI-MISTURA MULTI-CONTÊINER (CRÍTICA):
-                # Cenário: CT-e com 2 contêineres (A e B) → 2 linhas na planilha.
-                # Quando a NF do contêiner A chegar, ela traz CT-e + contêiner A.
-                # Sem esta regra, o sistema poderia encontrar a linha do contêiner B
-                # pelo CT-e igual e completar a linha errada.
-                #
-                # Regra: se o documento novo tem contêiner X e a linha tem contêiner Y
-                # e X ≠ Y → NUNCA mesclar, mesmo que CT-e, NF ou booking sejam iguais.
-                # O match só acontece quando os contêineres são compatíveis (ou vazios).
-                # ================================================================
                 if colisao_container:
-                    print(f"    🛡️ Anti-mistura: {cont_n_limpo} ≠ {item.get('container_limpo','')} → linha pulada")
                     continue
                 
                 clientes_incompativeis = False
@@ -372,7 +291,7 @@ def adicionar_ou_mesclar_linha(spreadsheet_id, aba_padrao, dados_novos):
                         linha_encontrada = item["linha_real"]
                         aba_encontrada = nome_aba
                         modo = "MESCLAR"
-                        print(f"    ✨ Documento agrupado por NF/CTE/Lacre/Booking na Planilha: '{nome_aba}' L{linha_encontrada}")
+                        print(f"    ✨ Documento agrupado por referência cruzada na Planilha: '{nome_aba}' L{linha_encontrada}")
                         break
                         
             if modo == "MESCLAR": break
@@ -418,7 +337,6 @@ def adicionar_ou_mesclar_linha(spreadsheet_id, aba_padrao, dados_novos):
                 if i < TAMANHO: linha_buffer[i] = str(v)
     except: pass
 
-    # 🔥 ESCUDO ANTI-DUPLICAÇÃO: Verifica se a NF enviada já existe na linha
     tem_nf_nova = True
     if nf_n and modo == "MESCLAR":
         idx_nf_sheet = mapa_colunas.get("NOTAS FISCAIS", mapa_colunas.get("NF", mapa_colunas.get("NOTA FISCAL", -1)))
@@ -511,7 +429,6 @@ def adicionar_ou_mesclar_linha(spreadsheet_id, aba_padrao, dados_novos):
                 
             elif k in ["VALOR DA NF", "PESO DA MERCADORIA KG"] and modo == "MESCLAR" and valor_atual and v:
                 if nf_n and not tem_nf_nova:
-                    # 🔥 Se a NF já existe, não soma o valor e o peso novamente!
                     continue
                 try:
                     num_atual = parse_float_br(valor_atual)
@@ -539,7 +456,6 @@ def adicionar_ou_mesclar_linha(spreadsheet_id, aba_padrao, dados_novos):
             body_values = {"valueInputOption": "USER_ENTERED", "data": data_requests}
             executar_com_resiliencia_infinita(service.spreadsheets().values().batchUpdate(spreadsheetId=spreadsheet_id, body=body_values))
             
-            # 🔥 FORMATAÇÃO FORÇADA: Aplica Arial 11 e Centralizado na linha INTEIRA!
             sheet_id_aba = info_aba.get("sheet_id")
             if sheet_id_aba is not None:
                 format_requests = [{
@@ -568,9 +484,6 @@ def adicionar_ou_mesclar_linha(spreadsheet_id, aba_padrao, dados_novos):
 
             CACHE_PLANILHA["carregado"] = False
 
-            # Retorna o contêiner da linha que foi mesclada/criada
-            # Isso permite ao processor.py e main.py criar a pasta correta
-            # mesmo quando o documento recebido (ex: NF) não tem contêiner
             idx_cont_ret = encontrar_indice_coluna(mapa_colunas, ["CONTAINER", "CNTR", "UNIDADE"])
             container_retorno = ""
             if idx_cont_ret != -1 and idx_cont_ret < len(linha_buffer):

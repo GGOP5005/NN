@@ -14,7 +14,6 @@ try:
 except ImportError:
     PASTA_BACKUP_RAIZ = r"G:\Meu Drive\NORTE NORDESTE"
 
-# Importa extrator de PDF para ler NF de arquivos órfãos
 try:
     from extrator_pdf import extrair_texto_pdf
     EXTRATOR_PDF_OK = True
@@ -75,7 +74,6 @@ def mover_com_mesclagem(origem, destino):
             pass
 
 def mover_arquivo_seguro(origem, destino_dir, nome_arquivo):
-    """Move um arquivo único para um diretório, sem colisões."""
     os.makedirs(destino_dir, exist_ok=True)
     destino = os.path.join(destino_dir, nome_arquivo)
     if os.path.exists(destino):
@@ -90,24 +88,18 @@ def mover_arquivo_seguro(origem, destino_dir, nome_arquivo):
     return False
 
 def extrair_nfs_do_arquivo(caminho_arquivo):
-    """
-    Extrai números de NF de um arquivo PDF usando regex nas chaves de acesso.
-    Retorna lista de strings de NF (ex: ["33636", "33633"]).
-    """
     nfs = []
     try:
         if caminho_arquivo.lower().endswith('.pdf') and EXTRATOR_PDF_OK:
             texto = extrair_texto_pdf(caminho_arquivo)
             if texto:
-                # Chaves de acesso com 44 dígitos — posição 25-34 é o número do documento
                 chaves = re.findall(r'\d{44}', texto)
                 for chave in chaves:
-                    if chave[20:22] in ["55", "57"]:  # NF-e ou CT-e
+                    if chave[20:22] in ["55", "57"]:
                         num = str(int(chave[25:34]))
                         if num and num not in nfs:
                             nfs.append(num)
 
-                # Fallback: número de NF direto no texto
                 if not nfs:
                     matches = re.findall(r'N[ºO°]?\s*\.?\s*0*([1-9]\d{4,8})', texto)
                     for m in matches:
@@ -118,15 +110,6 @@ def extrair_nfs_do_arquivo(caminho_arquivo):
     return nfs
 
 def obter_dados_planilha(spreadsheet_id, porto_nome):
-    """
-    Lê a planilha e retorna dois dicts:
-      - ativos_por_container: { "MRKU2792430": "MADECON DISTRIBUIDORA", ... }
-      - container_por_nf:     { "33636": "MRKU2792430", "33633": "MRKU2977178", ... }
-
-    Assim o organizador consegue resolver tanto:
-      - Pastas de contêiner no lugar errado (lógica antiga)
-      - Arquivos em SEM_CONTAINER que têm NF registrada na planilha (lógica nova)
-    """
     creds = Credentials.from_service_account_file(CREDS_PATH, scopes=SCOPES)
     service = build("sheets", "v4", credentials=creds)
 
@@ -149,7 +132,6 @@ def obter_dados_planilha(spreadsheet_id, porto_nome):
         if not linhas:
             return ativos_por_container, container_por_nf, aba_alvo
 
-        # Descobre índices das colunas
         idx_cont = -1
         idx_cliente = -1
         idx_nf = -1
@@ -194,7 +176,6 @@ def obter_dados_planilha(spreadsheet_id, porto_nome):
             if cont not in ativos_por_container or ativos_por_container[cont] == "CLIENTE_DESCONHECIDO":
                 ativos_por_container[cont] = cliente_limpo
 
-            # Mapeia cada NF desta linha para o contêiner correspondente
             if idx_nf != -1 and len(linha) > idx_nf:
                 nfs_str = str(linha[idx_nf]).strip()
                 for nf in re.split(r'[,;]', nfs_str):
@@ -218,23 +199,10 @@ def obter_dados_planilha(spreadsheet_id, porto_nome):
 
 def resgatar_sem_container(pasta_sem_container, destino_base_porto, aba_atual_nome,
                             ativos_por_container, container_por_nf, porto_nome):
-    """
-    Varre a pasta SEM_CONTAINER e tenta resolver cada arquivo:
-
-    Estratégia 1 — Nome do arquivo contém código de contêiner:
-      Ex: "CTe_MRKU2792430.pdf" → move para pasta MRKU2792430
-
-    Estratégia 2 — Lê o conteúdo do PDF e extrai número da NF,
-      depois consulta container_por_nf para descobrir o contêiner:
-      Ex: NF 33636 → MRKU2792430 (conforme planilha)
-
-    Estratégia 3 — Arquivo fica em SEM_CONTAINER (não conseguiu resolver)
-    """
     if not os.path.exists(pasta_sem_container):
         return 0
 
-    arquivos = [f for f in os.listdir(pasta_sem_container)
-                if os.path.isfile(os.path.join(pasta_sem_container, f))]
+    arquivos = [f for f in os.listdir(pasta_sem_container) if os.path.isfile(os.path.join(pasta_sem_container, f))]
     if not arquivos:
         return 0
 
@@ -247,7 +215,6 @@ def resgatar_sem_container(pasta_sem_container, destino_base_porto, aba_atual_no
         cliente_destino = ""
         origem_resolucao = ""
 
-        # --- Estratégia 1: código de contêiner no nome do arquivo ---
         cont_no_nome = re.search(r'[A-Z]{4}\d{7}', nome_arquivo.upper())
         if cont_no_nome:
             cont_candidato = cont_no_nome.group(0)
@@ -256,7 +223,6 @@ def resgatar_sem_container(pasta_sem_container, destino_base_porto, aba_atual_no
                 cliente_destino = ativos_por_container[cont_candidato]
                 origem_resolucao = "nome do arquivo"
 
-        # --- Estratégia 2: lê NF do conteúdo do arquivo e busca na planilha ---
         if not container_destino and caminho_arquivo.lower().endswith('.pdf'):
             nfs_arquivo = extrair_nfs_do_arquivo(caminho_arquivo)
             for nf in nfs_arquivo:
@@ -269,7 +235,6 @@ def resgatar_sem_container(pasta_sem_container, destino_base_porto, aba_atual_no
                         break
 
         if container_destino and cliente_destino:
-            # Monta o caminho de destino correto
             if porto_nome == "SALVADOR":
                 pasta_destino = os.path.join(destino_base_porto, aba_atual_nome, container_destino)
             else:
@@ -282,7 +247,6 @@ def resgatar_sem_container(pasta_sem_container, destino_base_porto, aba_atual_no
         else:
             print(Fore.WHITE + f"   ⏭️ Não resolvido (sem referência na planilha): {nome_arquivo}")
 
-    # Remove pasta SEM_CONTAINER se ficou vazia
     try:
         if os.path.exists(pasta_sem_container) and not os.listdir(pasta_sem_container):
             shutil.rmtree(pasta_sem_container)
@@ -297,7 +261,6 @@ def organizar_porto(porto_nome, spreadsheet_id):
     print(Fore.YELLOW + Style.BRIGHT + f" 🚢 SINCRONIZANDO PORTO: {porto_nome}")
     print(Fore.CYAN + f"==================================================")
 
-    # Carrega dados da planilha: contêineres ativos E mapa NF→contêiner
     ativos, container_por_nf, aba_atual_nome = obter_dados_planilha(spreadsheet_id, porto_nome)
 
     if not ativos and not container_por_nf:
@@ -319,9 +282,6 @@ def organizar_porto(porto_nome, spreadsheet_id):
         print(Fore.RED + f"   ❌ Pasta NORTE NORDESTE não encontrada: {pasta_norte_nordeste}")
         return
 
-    # ---------------------------------------------------------
-    # 1. VARREDURA NO DROPBOX (Organiza contêineres + Backup)
-    # ---------------------------------------------------------
     for pasta_ano_dropbox in os.listdir(pasta_norte_nordeste):
         caminho_base_dropbox = os.path.join(pasta_norte_nordeste, pasta_ano_dropbox)
         if not os.path.isdir(caminho_base_dropbox):
@@ -361,11 +321,6 @@ def organizar_porto(porto_nome, spreadsheet_id):
                         if os.path.isdir(p):
                             conteineres_para_ver.append((c, p, item_lvl1))
 
-                    # ============================================================
-                    # NOVO: Resgate de SEM_CONTAINER usando NF → planilha
-                    # Verifica se existe pasta SEM_CONTAINER dentro deste cliente
-                    # e tenta resolver cada arquivo lá dentro
-                    # ============================================================
                     pasta_sem_cont = os.path.join(caminho_lvl1, "SEM_CONTAINER")
                     if os.path.exists(pasta_sem_cont):
                         destino_base = caminho_base_dropbox
@@ -387,13 +342,9 @@ def organizar_porto(porto_nome, spreadsheet_id):
                     if cont_limpo in ativos:
                         cliente_correto = ativos[cont_limpo]
                         if porto_nome == "SALVADOR":
-                            caminho_correto = os.path.join(
-                                pasta_norte_nordeste, pasta_ano_dropbox, aba_atual_nome, cont_limpo
-                            )
+                            caminho_correto = os.path.join(pasta_norte_nordeste, pasta_ano_dropbox, aba_atual_nome, cont_limpo)
                         else:
-                            caminho_correto = os.path.join(
-                                pasta_norte_nordeste, pasta_ano_dropbox, aba_atual_nome, cliente_correto, cont_limpo
-                            )
+                            caminho_correto = os.path.join(pasta_norte_nordeste, pasta_ano_dropbox, aba_atual_nome, cliente_correto, cont_limpo)
 
                         if caminho_cont != caminho_correto:
                             print(Fore.YELLOW + f"   🚁 CORRIGINDO: {cont_limpo} → {aba_atual_nome}/{cliente_correto}")
@@ -402,7 +353,6 @@ def organizar_porto(porto_nome, spreadsheet_id):
 
                     else:
                         if calculo_pasta < calculo_atual:
-                            # Verifica se o drive de backup está acessível antes de tentar mover
                             drive_backup = os.path.splitdrive(PASTA_BACKUP_RAIZ)[0] + "\\"
                             if not os.path.exists(drive_backup):
                                 print(Fore.YELLOW + f"   ⚠️ Drive de backup '{drive_backup}' não está conectado. Pulando backup de {cont_limpo}.")
@@ -420,13 +370,9 @@ def organizar_porto(porto_nome, spreadsheet_id):
                                     break
 
                             if porto_nome == "SALVADOR":
-                                caminho_backup = os.path.join(
-                                    caminho_backup_raiz, str(ano_pasta_int), pasta_mes.upper(), cont_limpo
-                                )
+                                caminho_backup = os.path.join(caminho_backup_raiz, str(ano_pasta_int), pasta_mes.upper(), cont_limpo)
                             else:
-                                caminho_backup = os.path.join(
-                                    caminho_backup_raiz, str(ano_pasta_int), pasta_mes.upper(), cliente_nome or "DESCONHECIDO", cont_limpo
-                                )
+                                caminho_backup = os.path.join(caminho_backup_raiz, str(ano_pasta_int), pasta_mes.upper(), cliente_nome or "DESCONHECIDO", cont_limpo)
 
                             print(Fore.MAGENTA + f"   📦 BACKUP: Arquivando {cont_limpo} → Drive G: ({ano_pasta_int}/{pasta_mes.upper()})")
                             mover_com_mesclagem(caminho_cont, caminho_backup)
@@ -439,9 +385,6 @@ def organizar_porto(porto_nome, spreadsheet_id):
                     except:
                         pass
 
-    # ---------------------------------------------------------
-    # 2. VARREDURA NO DRIVE G: BACKUP (Buscando resgates perdidos)
-    # ---------------------------------------------------------
     drive_backup = os.path.splitdrive(PASTA_BACKUP_RAIZ)[0] + "\\"
     if not os.path.exists(drive_backup):
         print(Fore.YELLOW + f"   ⚠️ Drive de backup '{drive_backup}' não está conectado. Pulando varredura do backup.")
@@ -488,7 +431,6 @@ def organizar_porto(porto_nome, spreadsheet_id):
 
                             if cont_limpo in ativos:
                                 cliente_correto = ativos[cont_limpo]
-
                                 pasta_dropbox_correta = f"DOCUMENTAÇÃO DE ENTREGA {porto_nome} {ano_atual}"
                                 for p_drop in os.listdir(pasta_norte_nordeste):
                                     if porto_nome in p_drop.upper() and "ENTREGA" in p_drop.upper():
@@ -496,13 +438,9 @@ def organizar_porto(porto_nome, spreadsheet_id):
                                         break
 
                                 if porto_nome == "SALVADOR":
-                                    caminho_correto = os.path.join(
-                                        pasta_norte_nordeste, pasta_dropbox_correta, aba_atual_nome, cont_limpo
-                                    )
+                                    caminho_correto = os.path.join(pasta_norte_nordeste, pasta_dropbox_correta, aba_atual_nome, cont_limpo)
                                 else:
-                                    caminho_correto = os.path.join(
-                                        pasta_norte_nordeste, pasta_dropbox_correta, aba_atual_nome, cliente_correto, cont_limpo
-                                    )
+                                    caminho_correto = os.path.join(pasta_norte_nordeste, pasta_dropbox_correta, aba_atual_nome, cliente_correto, cont_limpo)
 
                                 print(Fore.RED + Style.BRIGHT + f"   🚨 URGENTE: Resgatando {cont_limpo} do Drive G: → {cliente_correto}!")
                                 mover_com_mesclagem(caminho_cont, caminho_correto)
@@ -515,9 +453,6 @@ def organizar_porto(porto_nome, spreadsheet_id):
                             except:
                                 pass
 
-    # ---------------------------------------------------------
-    # RESUMO
-    # ---------------------------------------------------------
     if movidos_resgate > 0 or movidos_backup > 0 or resgatados_sem_container > 0:
         if movidos_resgate > 0:
             print(Fore.GREEN + f"   🏁 {movidos_resgate} contêiner(es) organizado(s)/resgatado(s) para o mês atual.")
@@ -533,7 +468,6 @@ def iniciar_organizacao():
     print(Fore.YELLOW + Style.BRIGHT + f" 🗄️ INICIANDO GESTOR MASTER DE PASTAS E BACKUP ({datetime.now().strftime('%H:%M:%S')})")
     print(Fore.BLUE + "="*70)
 
-    # Santos e Salvador adicionados — antes eram excluídos sem motivo documentado
     portos_alvo = ["SUAPE", "PECEM", "MANAUS", "SANTOS", "SALVADOR"]
 
     for pasta_entrada, s_id in ROTEAMENTO_PORTOS.items():

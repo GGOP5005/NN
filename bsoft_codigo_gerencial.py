@@ -572,12 +572,6 @@ def ler_cliente_formulario(frame):
 def trocar_codigo_gerencial(frame, nome_cliente, memoria):
     """
     Troca o Código Gerencial SUBSTITUINDO a linha existente com 08.002.
-    
-    Estratégia:
-    1. Encontra qual índice [N] do select contém o 08.002 pelo title do select
-    2. Usa o campo de pesquisa pswobj[N] correspondente a essa linha
-    3. Digita o nome e seleciona a opção correta
-    4. Remove linhas extras que possam ter sido criadas
     """
     primeiro = primeiro_nome_cliente(nome_cliente)
     print(Fore.WHITE + f"      🔎 Buscando código para '{nome_cliente}' (termo: '{primeiro}')")
@@ -585,7 +579,6 @@ def trocar_codigo_gerencial(frame, nome_cliente, memoria):
     try:
         # Passo 1: Descobre qual índice do select tem o 08.002
         info_linha = frame.evaluate(f"""() => {{
-            // Acha todos os selects de código gerencial
             const sels = document.querySelectorAll(
                 "select[name^='dados_grupoApropriador_apropGerencial_codigo']"
             );
@@ -593,14 +586,11 @@ def trocar_codigo_gerencial(frame, nome_cliente, memoria):
             for (let i = 0; i < sels.length; i++) {{
                 const sel = sels[i];
                 const titulo = sel.getAttribute('title') || '';
-                const valorAtual = sel.value;
                 
-                // Verifica se este select tem o 08.002 no title ou no valor selecionado
                 if (titulo.includes('08.002') || titulo.includes('RECEITAS COM FRETES')) {{
-                    // Extrai o índice do name: dados_grupoApropriador_apropGerencial_codigo[1] → 1
                     const match = sel.name.match(/\\[(\\d+)\\]/);
                     const idx = match ? match[1] : '1';
-                    const idCampo = sel.id; // ex: cswobj1
+                    const idCampo = sel.id; 
                     const numCampo = idCampo.replace('cswobj', '');
                     
                     return {{
@@ -615,7 +605,6 @@ def trocar_codigo_gerencial(frame, nome_cliente, memoria):
                 }}
             }}
             
-            // Se não achou o 08.002, usa o primeiro select disponível
             if (sels.length > 0) {{
                 const sel = sels[0];
                 const match = sel.name.match(/\\[(\\d+)\\]/);
@@ -645,7 +634,6 @@ def trocar_codigo_gerencial(frame, nome_cliente, memoria):
         id_select   = info_linha['id_select']
 
         # Passo 2: Força visibilidade e preenche o campo de pesquisa da linha correta
-        # Usa gerar_termos_busca para tentar múltiplos termos em sequência
         termos_busca = gerar_termos_busca(nome_cliente)
         print(Fore.WHITE + f"      🔎 Termos de busca: {termos_busca[:5]}")
 
@@ -658,7 +646,6 @@ def trocar_codigo_gerencial(frame, nome_cliente, memoria):
                 const campo = document.getElementById('{id_pesquisa}');
                 if (!campo) return {{ok: false, erro: 'campo nao encontrado'}};
 
-                // Força visibilidade do container pai
                 let el = campo;
                 while (el && el !== document.body) {{
                     if (el.style && el.style.display === 'none') el.style.display = '';
@@ -668,7 +655,6 @@ def trocar_codigo_gerencial(frame, nome_cliente, memoria):
 
                 campo.value = '{termo}';
 
-                // Lupa mais próxima do campo
                 const lupas = document.querySelectorAll(
                     "i[name='botaoPesquisa_dados_grupoApropriador_apropGerencial_codigo']"
                 );
@@ -694,7 +680,6 @@ def trocar_codigo_gerencial(frame, nome_cliente, memoria):
 
             time.sleep(2.5)
 
-            # Lê opções válidas do select
             opcoes_dados = frame.evaluate(f"""() => {{
                 const sel = document.getElementById('{id_select}');
                 if (!sel) return [];
@@ -735,7 +720,6 @@ def trocar_codigo_gerencial(frame, nome_cliente, memoria):
 
             sel.value = '{valor_escolhido}';
 
-            // Executa as funções do _swev_onchange
             try {{ validaContasSinteticas(sel); }} catch(e) {{}}
             try {{ validaPreenchimento(); }} catch(e) {{}}
             try {{ Sisweb.aplicarTitle(sel.name, 'select-one'); }} catch(e) {{}}
@@ -747,103 +731,6 @@ def trocar_codigo_gerencial(frame, nome_cliente, memoria):
                 valor_set: sel.value,
                 texto_set: idx >= 0 ? sel.options[idx].text : '',
                 id_usado: sel.id
-            }};
-        }}""")
-
-        print(Fore.CYAN + f"      💾 Seleção: {resultado_selecao}")
-        time.sleep(1)
-
-        return True, opcao_escolhida, metodo
-
-    except Exception as e:
-        print(Fore.RED + f"      ❌ Erro: {e}")
-        return False, "", f"ERRO: {e}"
-
-        print(Fore.CYAN + f"      🔍 Pesquisa: {resultado_pesquisa}")
-        time.sleep(3)  # Aguarda AJAX retornar
-
-        # Passo 2: Lê opções válidas (exclui value=0 que são categorias desabilitadas)
-        opcoes_dados = frame.evaluate("""() => {
-            const sel = document.querySelector(
-                "select[name^='dados_grupoApropriador_apropGerencial_codigo']"
-            ) || document.querySelector("select[id^='cswobj']");
-            if (!sel) return [];
-            return Array.from(sel.options)
-                .filter(o => o.value && o.value !== '0' && !o.disabled && o.text.trim())
-                .map(o => ({value: o.value, text: o.text.trim()}));
-        }""")
-
-        textos_opcoes  = [o['text']  for o in opcoes_dados]
-        valores_opcoes = [o['value'] for o in opcoes_dados]
-
-        print(Fore.WHITE + f"      📋 {len(textos_opcoes)} opção(ões) válidas:")
-        for t in textos_opcoes:
-            print(Fore.WHITE + f"         - {t}")
-
-        # Tenta palavras alternativas se vazio
-        if not textos_opcoes:
-            palavras = [p for p in remover_acentos(nome_cliente).split() if len(p) > 3]
-            for termo_alt in palavras[1:3]:
-                print(Fore.YELLOW + f"      ⚠️ Sem resultados. Tentando '{termo_alt}'...")
-                frame.evaluate(f"""() => {{
-                    const campo = document.querySelector(
-                        "input[name='pesquisa_dados_grupoApropriador_apropGerencial_codigo']"
-                    );
-                    if (!campo) return;
-                    campo.value = '{termo_alt}';
-                    const lupa = document.querySelector(
-                        "i[name='botaoPesquisa_dados_grupoApropriador_apropGerencial_codigo']"
-                    );
-                    if (lupa) lupa.click();
-                    else campo.dispatchEvent(new KeyboardEvent('keydown', {{key:'Enter', keyCode:13, bubbles:true}}));
-                }}""")
-                time.sleep(3)
-                opcoes_dados = frame.evaluate("""() => {
-                    const sel = document.querySelector(
-                        "select[name^='dados_grupoApropriador_apropGerencial_codigo']"
-                    ) || document.querySelector("select[id^='cswobj']");
-                    if (!sel) return [];
-                    return Array.from(sel.options)
-                        .filter(o => o.value && o.value !== '0' && !o.disabled && o.text.trim())
-                        .map(o => ({value: o.value, text: o.text.trim()}));
-                }""")
-                textos_opcoes  = [o['text']  for o in opcoes_dados]
-                valores_opcoes = [o['value'] for o in opcoes_dados]
-                if textos_opcoes:
-                    break
-
-        if not textos_opcoes:
-            print(Fore.RED + f"      ❌ Nenhuma opção para '{nome_cliente}'.")
-            return False, "", "SEM RESULTADOS"
-
-        # Passo 3: Escolhe melhor opção (com memória e confirmação interativa)
-        idx, opcao_escolhida, valor_escolhido, metodo = selecionar_melhor_opcao(
-            textos_opcoes, valores_opcoes, nome_cliente, memoria
-        )
-        if idx == -1:
-            print(Fore.YELLOW + f"      ⏭️ Pulado: {metodo}")
-            return False, "", metodo
-
-        print(Fore.CYAN + f"      ✨ Selecionando ({metodo}): '{opcao_escolhida}'")
-
-        # Passo 4: Seleciona executando _swev_onchange como o bsoft faria
-        resultado_selecao = frame.evaluate(f"""() => {{
-            const sel = document.querySelector(
-                "select[name^='dados_grupoApropriador_apropGerencial_codigo']"
-            ) || document.querySelector("select[id^='cswobj']");
-            if (!sel) return {{ok: false, erro: 'select nao encontrado'}};
-
-            sel.value = '{valor_escolhido}';
-            try {{ validaContasSinteticas(sel); }} catch(e) {{}}
-            try {{ validaPreenchimento(); }} catch(e) {{}}
-            try {{ Sisweb.aplicarTitle(sel.name, 'select-one'); }} catch(e) {{}}
-            sel.dispatchEvent(new Event('change', {{bubbles: true}}));
-
-            const idx = sel.selectedIndex;
-            return {{
-                ok: true,
-                valor_set: sel.value,
-                texto_set: idx >= 0 ? sel.options[idx].text : ''
             }};
         }}""")
 

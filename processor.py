@@ -2,6 +2,7 @@ import os
 import time
 import re
 from datetime import datetime
+
 from config import PASTA_ERROS, COLUNAS, ROTEAMENTO_PORTOS
 from extrator_ia import extrair_com_ia
 from sheets_api import adicionar_ou_mesclar_linha
@@ -59,15 +60,11 @@ def processar_arquivo(caminho_arquivo, spreadsheet_id):
 
     texto_sanitizado = re.sub(r'[ \t]+', ' ', texto_extraido).strip()
 
-    # extrair_com_ia agora retorna SEMPRE uma lista de dicts
-    # Ex: 1 conteiner  ->  [{}]
-    # Ex: 2 conteineres -> [{}, {}]  (cada um com sua NF vinculada)
     dados_json_lista = extrair_com_ia(texto_sanitizado)
 
     if not dados_json_lista:
         return False, []
 
-    # Garante que e sempre lista (seguranca extra)
     if isinstance(dados_json_lista, dict):
         dados_json_lista = [dados_json_lista]
 
@@ -92,21 +89,10 @@ def processar_arquivo(caminho_arquivo, spreadsheet_id):
 
     for dados_json in dados_json_lista:
 
-        # Regra fixa de Santos
         if nome_porto == "SANTOS":
             dados_json["CLIENTES"] = "RISADINHA"
             dados_json["DESTINO"] = "PRAIA GRANDE"
 
-        # ================================================================
-        # SEPARACAO DE CONTEINERES
-        #
-        # A IA ja deve retornar um JSON por conteiner (com sua NF vinculada).
-        # Este bloco e um FALLBACK para o caso em que a IA ainda juntar
-        # 2 conteineres num unico JSON (ex: CONTAINER: "MRKU123, MSCU456").
-        #
-        # Se a IA ja separou corretamente (1 conteiner por JSON), este loop
-        # roda apenas 1 vez e nao altera nada.
-        # ================================================================
         container_str = dados_json.get("CONTAINER", "")
         cont_matches = re.findall(r'[A-Za-z]{4}\s*\d{7}', container_str)
 
@@ -116,8 +102,6 @@ def processar_arquivo(caminho_arquivo, spreadsheet_id):
         else:
             lista_containers = [container_str.strip()] if container_str.strip() else [""]
 
-        # Se a IA JA separou (1 conteiner no JSON) → multiplos_containers_fallback = False
-        # Se a IA NAO separou (2+ conteineres no mesmo JSON) → aplica fallback
         multiplos_containers_fallback = len(lista_containers) > 1
 
         if multiplos_containers_fallback:
@@ -133,18 +117,10 @@ def processar_arquivo(caminho_arquivo, spreadsheet_id):
                 dados_copia["PESO DA MERCADORIA KG"] = ""
                 print(f"    📦 Fallback linha: {cont} | NF/Valor aguardam chegada individual")
 
-            st = adicionar_ou_mesclar_linha(spreadsheet_id, aba_mes, dados_copia)
+            st, container_retorno = adicionar_ou_mesclar_linha(spreadsheet_id, aba_mes, dados_copia)
             if not st:
                 status_final = False
 
-            # ================================================================
-            # RESGATE DE CONTÊINER DA PLANILHA
-            # Cenário: NF chegou sem contêiner (campo vazio).
-            # O sheets_api fez merge pelo número da NF e encontrou a linha certa.
-            # Mas o dados_copia ainda tem CONTAINER vazio.
-            # Solução: busca no cache da planilha o contêiner que estava na linha
-            # para que o main.py crie a pasta no lugar correto.
-            # ================================================================
             if not dados_copia.get("CONTAINER"):
                 try:
                     from sheets_api import CACHE_PLANILHA, simplificar_id
@@ -153,7 +129,6 @@ def processar_arquivo(caminho_arquivo, spreadsheet_id):
 
                     for nome_aba, conteudo in CACHE_PLANILHA.get("dados", {}).items():
                         for item in conteudo.get("linhas", []):
-                            # Casa pela NF ou pelo CT-e
                             nfs_linha = [x.strip() for x in item.get("nf", "").split(",") if x.strip()]
                             cte_linha = item.get("cte_armador", "") or item.get("cte_nosso", "")
 
@@ -167,7 +142,7 @@ def processar_arquivo(caminho_arquivo, spreadsheet_id):
                         if dados_copia.get("CONTAINER"):
                             break
                 except Exception as e:
-                    pass  # Se falhar, continua sem contêiner (vai para SEM_CONTAINER)
+                    pass
 
             dados_processados.append(dados_copia)
 

@@ -1,9 +1,5 @@
 import os
 import sys
-
-# Adiciona o diretório raiz ao path para imports funcionarem
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 from playwright.sync_api import sync_playwright
 import time
 import unicodedata
@@ -17,6 +13,8 @@ import pytesseract
 import tempfile
 from PIL import Image
 from datetime import datetime
+
+# Imports diretos da arquitetura raiz
 from config import TECON_CPF, TECON_SENHA, HEADLESS, CNPJ_TRANSPORTADORA
 from buscador_pdfs import encontrar_pasta_container, classificar_e_extrair_pdfs
 
@@ -290,7 +288,6 @@ def verificar_passes_aprovados(lista_containers):
                         
                         page.locator("button[data-ng-click='getPartialFilter(filter)']").click()
                         
-                        # 🔒 BLINDAGEM MÁXIMA: OBRIGA O ROBÔ A ESPERAR A TABELA DO TECON CARREGAR (5 Segundos)
                         print(f"   ⏳ Aguardando atualização do Tecon...")
                         time.sleep(5)
                         
@@ -302,7 +299,6 @@ def verificar_passes_aprovados(lista_containers):
                             
                         texto_linha = primeira_linha.inner_text().upper()
                         
-                        # 👁️ RAIO-X: Imprime exatamente o que o robô está a ler na tabela!
                         linha_display = texto_linha.replace('\n', ' | ').strip()
                         print(f"   👀 Status lido na tela: {linha_display}")
                         

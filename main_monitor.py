@@ -3,6 +3,8 @@ import time
 import schedule
 from datetime import datetime
 from colorama import init, Fore, Style
+
+# Imports diretos da arquitetura raiz
 from sheets_suape import buscar_containers_pendentes, buscar_containers_falta_passe, buscar_containers_passe_solicitado, atualizar_status_planilha, obter_aba_atual
 from scraper_tecon import processar_lote_tecon, solicitar_passes_tecon, verificar_passes_aprovados
 
@@ -24,8 +26,6 @@ def executar_ciclo_expresso(numero_container, linha_planilha=None, aba_planilha=
     if not numero_container or len(numero_container) < 11:
         return
 
-    # CORREÇÃO BUG 6: aba dinâmica em vez de "MARÇO" hardcoded
-    # Antes: aba_planilha="MARÇO" como padrão causava escrita no mês errado
     if aba_planilha is None:
         aba_planilha = obter_aba_atual()
         
@@ -53,7 +53,6 @@ def executar_ciclo_expresso(numero_container, linha_planilha=None, aba_planilha=
             print(Fore.RED + f"   ❌ [ERRO EXPRESSO] Falha ou bloqueio ao tentar faturar {numero_container} agora.")
             
     else:
-        # ---> ESCREVE NA PLANILHA SE NÃO CHEGOU (NO MODO EXPRESSO) <---
         print(Fore.YELLOW + f"   ⏳ [EXPRESSO] O contêiner {numero_container} ainda não chegou (Não Liberado). O relógio agendado cuidará dele mais tarde.")
         if linha_planilha:
             atualizar_status_planilha(linha_planilha, "NÃO LIBERADO", aba_planilha)
@@ -90,9 +89,7 @@ def rotina_monitoramento_passes():
                 else:
                     print(Fore.GREEN + f"   ✅ {numero}: {status_retornado}")
             
-            # ATENÇÃO: Nunca escreve "EM ANÁLISE" na planilha! Fica intacto até ter o passe final.
             if status_retornado and status_retornado not in ["EM ANÁLISE", "EM_ANALISE", "ERRO NA VERIFICAÇÃO", "NÃO ENCONTRADO"]:
-                # CORREÇÃO BUG 6: usa item.get("aba") que já vem dinâmico do sheets_suape
                 atualizar_status_planilha(item["linha"], status_retornado, item.get("aba", obter_aba_atual()))
                 time.sleep(1)
     else:
@@ -108,7 +105,6 @@ def executar_ciclo_completo():
     print(Fore.YELLOW + Style.BRIGHT + f" 🔄 INICIANDO CICLO DE VARREDURA PESADA ({datetime.now().strftime('%H:%M:%S')})")
     print(Fore.BLUE + "="*70)
     
-    # CORREÇÃO BUG 6: aba calculada uma vez por ciclo (dinâmica)
     aba_ciclo = obter_aba_atual()
     
     print(Fore.WHITE + Style.BRIGHT + "\n🛳️  FASE 1: RASTREIO DE CHEGADAS")
@@ -120,7 +116,6 @@ def executar_ciclo_completo():
         
         for item in fila_pendentes:
             status = resultados.get(item["numero"])
-            # CORREÇÃO BUG 6: item.get("aba") já é dinâmico; fallback usa aba_ciclo
             aba_item = item.get("aba", aba_ciclo)
             if status == "DISPONIVEL":
                 print(Fore.GREEN + f"   ✅ {item['numero']}: DISPONÍVEL (Chegou ao porto!)")
@@ -159,7 +154,6 @@ def executar_ciclo_completo():
     print(Fore.BLUE + "-"*70)
     print(Fore.GREEN + f"🏁 Varredura Pesada finalizada com sucesso.\n")
     
-    # Após a varredura pesada, ele executa a Fase 3 automaticamente
     rotina_monitoramento_passes()
 
 if __name__ == "__main__":
@@ -174,13 +168,11 @@ if __name__ == "__main__":
     
     ultimo_minuto_rodado = None
 
-    # Agenda a rotina de passes a cada 45 minutos!
     schedule.every(45).minutes.do(rotina_monitoramento_passes)
 
     while True:
         agora = datetime.now().strftime("%H:%M")
         
-        # Disparo dos Horários Mestres
         if agora in HORARIOS_AGENDADOS and agora != ultimo_minuto_rodado:
             print(Fore.YELLOW + Style.BRIGHT + f"\n⏰ O relógio bateu {agora}! Acordando o robô para Varredura Pesada...")
             try:
@@ -190,6 +182,5 @@ if __name__ == "__main__":
             ultimo_minuto_rodado = agora
             print(Fore.WHITE + f"💤 Robô voltou a dormir no relógio principal.")
             
-        # O schedule.run_pending() cuida do loop de 45 minutos automaticamente no fundo
         schedule.run_pending()
         time.sleep(30)
