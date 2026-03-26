@@ -217,7 +217,7 @@ def adicionar_ou_mesclar_linha(spreadsheet_id, aba_padrao, dados_novos):
         cont_n_limpo = simplificar_id(cont_n)
 
         if not any([nf_n, cte_armador_n, cte_nosso_n, cont_n_limpo, lacre_n, booking_n]):
-            return False
+            return False, ""
 
         aba_encontrada = aba_padrao.upper()
 
@@ -298,8 +298,23 @@ def adicionar_ou_mesclar_linha(spreadsheet_id, aba_padrao, dados_novos):
 
         if modo == "NOVO":
             if aba_encontrada not in CACHE_PLANILHA["dados"]:
-                print(f"    ❌ BLOQUEADO: A aba '{aba_encontrada}' não existe.")
-                return False
+                # Tenta variantes com/sem acento (MARCO ↔ MARÇO)
+                variantes = [aba_encontrada, aba_encontrada.replace("MARCO", "MARÇO"), aba_encontrada.replace("MARÇO", "MARCO")]
+                encontrou_variante = False
+                for var in variantes:
+                    if var in CACHE_PLANILHA["dados"]:
+                        aba_encontrada = var
+                        encontrou_variante = True
+                        break
+                if not encontrou_variante:
+                    # Último recurso: usa a primeira aba disponível nos dados
+                    abas_com_dados = list(CACHE_PLANILHA["dados"].keys())
+                    if abas_com_dados:
+                        aba_encontrada = abas_com_dados[0]
+                        print(f"    ⚠️ Aba '{aba_encontrada}' não encontrada. Usando '{aba_encontrada}' como fallback.")
+                    else:
+                        print(f"    ❌ BLOQUEADO: Nenhuma aba disponível no cache.")
+                        return False, ""
             break
 
         if modo == "MESCLAR":
@@ -319,7 +334,7 @@ def adicionar_ou_mesclar_linha(spreadsheet_id, aba_padrao, dados_novos):
                 continue
 
     info_aba = CACHE_PLANILHA["dados"].get(aba_encontrada)
-    if not info_aba: return False
+    if not info_aba: return False, ""
 
     TAMANHO = conf["tamanho"]
     mapa_colunas = info_aba["mapa"]

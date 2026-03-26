@@ -10,7 +10,8 @@ from colorama import init, Fore, Style
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
-from config import ROTEAMENTO_PORTOS, PASTA_ERROS, DROPBOX_DIR
+# Importações atualizadas com os novos nomes do config.py
+from config import ROTEAMENTO_PORTOS, PASTA_ERROS, PASTA_RAIZ_DOCUMENTOS, PASTA_ENTRADAS
 from processor import processar_arquivo
 from sheets_api import buscar_container_por_nf
 
@@ -30,7 +31,7 @@ def limpar_tela():
 def banner():
     print(Fore.CYAN + Style.BRIGHT + "=" * 60)
     print(Fore.CYAN + "          ROBÔ DE LOGÍSTICA - MULTI PORTOS")
-    print(Fore.CYAN + "          v13.0 - Fix NF sem Contêiner + Multi-Contêiner")
+    print(Fore.CYAN + "          v15.0 - Caminhos Desacoplados (Entrada != Saída)")
     print(Fore.CYAN + "=" * 60 + "\n")
 
 def padronizar_nome_cliente(nome):
@@ -109,7 +110,8 @@ def worker_processamento():
                     clientes_str = dados_json.get("CLIENTES", "").strip() if dados_json else ""
                     destinatario_limpo = padronizar_nome_cliente(clientes_str)
 
-                    dropbox_root = os.path.dirname(DROPBOX_DIR)
+                    # DESTINO FINAL: Usa a variável limpa que definimos no config.py
+                    dropbox_root = PASTA_RAIZ_DOCUMENTOS
                     caminho_visual = ""
 
                     if nome_porto == "SANTOS":
@@ -117,7 +119,7 @@ def worker_processamento():
                         booking_limpo = re.sub(r'[\\/*?:"<>|]', "", booking_str)
                         if not booking_limpo: booking_limpo = "SEM_BOOKING"
 
-                        base_porto = os.path.join(dropbox_root, "NORTE NORDESTE", "DOCUMENTAÇÃO NAVIO", "SANTOS", "RISADINHA")
+                        base_porto = os.path.join(dropbox_root, "DOCUMENTAÇÃO NAVIO", "SANTOS", "RISADINHA")
                         destino_porto_raiz = os.path.join(base_porto, booking_limpo, container_limpo if container_limpo else "SEM_CONTAINER")
                         pasta_orfaos = os.path.join(base_porto, booking_limpo, "SEM_CONTAINER")
 
@@ -134,7 +136,7 @@ def worker_processamento():
 
                     elif nome_porto == "SALVADOR":
                         nome_pasta_porto = f"DOCUMENTAÇÃO DE ENTREGA SALVADOR {ano_atual}"
-                        base_porto = os.path.join(dropbox_root, "NORTE NORDESTE", nome_pasta_porto)
+                        base_porto = os.path.join(dropbox_root, nome_pasta_porto)
                         destino_porto_raiz = os.path.join(base_porto, mes_atual, destinatario_limpo, container_limpo if container_limpo else "SEM_CONTAINER")
                         pasta_orfaos = os.path.join(base_porto, mes_atual, destinatario_limpo, "SEM_CONTAINER")
                         destino_porto = destino_porto_raiz
@@ -142,7 +144,7 @@ def worker_processamento():
 
                     else:
                         nome_pasta_porto = f"DOCUMENTAÇÃO DE ENTREGA {nome_porto} {ano_atual}"
-                        base_porto = os.path.join(dropbox_root, "NORTE NORDESTE", nome_pasta_porto)
+                        base_porto = os.path.join(dropbox_root, nome_pasta_porto)
                         destino_porto_raiz = os.path.join(base_porto, mes_atual, destinatario_limpo, container_limpo if container_limpo else "SEM_CONTAINER")
                         pasta_orfaos = os.path.join(base_porto, mes_atual, destinatario_limpo, "SEM_CONTAINER")
                         destino_porto = destino_porto_raiz
@@ -205,7 +207,7 @@ def worker_processamento():
                             except:
                                 pass
 
-                    if INTEGRACAO_ATIVA and dados_json:
+                    if 'INTEGRACAO_ATIVA' in globals() and INTEGRACAO_ATIVA and dados_json:
                         cte_armador = dados_json.get("CT-E ARMADOR", "").strip()
                         cte_nosso = dados_json.get("CTE-E", "").strip()
                         tem_cte = bool(cte_armador or cte_nosso)
@@ -242,17 +244,33 @@ def worker_processamento():
             fila_arquivos.task_done()
             time.sleep(2)
 
+
 class MonitorPortosHandler(FileSystemEventHandler):
     def on_created(self, event):
         if event.is_directory: return
         caminho_arquivo = event.src_path
+        
+        nome_arquivo = os.path.basename(caminho_arquivo)
+        if nome_arquivo.startswith('~$'): return
+        
         if caminho_arquivo.lower().endswith(('.pdf', '.xml', '.xlsx', '.xls', '.csv')):
-            pasta_pai = os.path.dirname(caminho_arquivo)
-            id_planilha = ROTEAMENTO_PORTOS.get(pasta_pai)
+            
+            pasta_pai_evento = os.path.normpath(os.path.dirname(caminho_arquivo)).lower()
+            
+            id_planilha = None
+            nome_porto = ""
+            
+            for pasta_conf, plan_id in ROTEAMENTO_PORTOS.items():
+                pasta_conf_norm = os.path.normpath(pasta_conf).lower()
+                if pasta_conf_norm == pasta_pai_evento:
+                    id_planilha = plan_id
+                    nome_porto = os.path.basename(pasta_conf).replace("entrada_", "").upper()
+                    break
+                    
             if id_planilha:
-                nome_porto = os.path.basename(pasta_pai).replace("entrada_", "").upper()
-                print(Fore.MAGENTA + f"📥 NOVO ARQUIVO DETECTADO EM {nome_porto}: {os.path.basename(caminho_arquivo)}")
+                print(Fore.MAGENTA + f"📥 NOVO ARQUIVO DETECTADO EM {nome_porto}: {nome_arquivo}")
                 fila_arquivos.put((caminho_arquivo, id_planilha, nome_porto))
+
 
 def varredura_inicial():
     print(Fore.YELLOW + "🔍 Realizando varredura de passivo...")
@@ -261,8 +279,10 @@ def varredura_inicial():
         if not os.path.exists(pasta_entrada):
             os.makedirs(pasta_entrada)
             continue
-        arquivos = [f for f in os.listdir(pasta_entrada) if f.lower().endswith(('.pdf', '.xml', '.xlsx', '.xls', '.csv'))]
+        
+        arquivos = [f for f in os.listdir(pasta_entrada) if f.lower().endswith(('.pdf', '.xml', '.xlsx', '.xls', '.csv')) and not f.startswith('~$')]
         nome_porto = os.path.basename(pasta_entrada).replace("entrada_", "").upper()
+        
         for arquivo in arquivos:
             caminho_completo = os.path.join(pasta_entrada, arquivo)
             fila_arquivos.put((caminho_completo, id_planilha, nome_porto))
@@ -272,6 +292,7 @@ def varredura_inicial():
         print(Fore.GREEN + f"✅ {arquivos_encontrados} arquivo(s) encontrado(s) e adicionado(s) à fila.")
     else:
         print(Fore.WHITE + "✅ Nenhum arquivo passivo. Pastas limpas.")
+
 
 def main():
     limpar_tela()
@@ -290,7 +311,7 @@ def main():
         print(Fore.WHITE + f"   📂 {nome_pasta}")
         observer.schedule(handler, path=pasta, recursive=False)
 
-    print(Fore.YELLOW + "\n📂 Destino dos Processados (Raiz): " + Fore.WHITE + os.path.join(os.path.dirname(DROPBOX_DIR), "NORTE NORDESTE"))
+    print(Fore.YELLOW + "\n📂 Destino dos Processados (Raiz): " + Fore.WHITE + PASTA_RAIZ_DOCUMENTOS)
     print(Fore.CYAN + "-" * 60)
     print(Fore.GREEN + "🟢 SISTEMA ATIVO 24/7.")
     print(Fore.WHITE + "Pressione Ctrl+C para parar o robô de forma segura.\n")
@@ -304,6 +325,7 @@ def main():
         observer.stop()
     observer.join()
     print(Fore.RED + "Desligado.")
+
 
 if __name__ == "__main__":
     main()

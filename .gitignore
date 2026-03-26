@@ -32,3 +32,4 @@ entrada_suape/
 .env
 credentials.json
 *memoria*.json
+chaves.py

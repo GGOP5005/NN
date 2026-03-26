@@ -1,126 +1,131 @@
 import os
+import re
+import json
+import time
 from google import genai
 from google.genai import types
-import json
-import re
-import time
 from config import LISTA_CHAVES_GEMINI, COLUNAS
 
 MODELOS_CACHEADOS = {}
 
 def listar_modelo_disponivel(client, chave):
+    """Retorna o melhor modelo Gemini disponível para a chave."""
     global MODELOS_CACHEADOS
     if chave in MODELOS_CACHEADOS:
         return MODELOS_CACHEADOS[chave]
     try:
-        models = client.models.list()
-        for m in models:
-            nome = m.name.lower()
-            if '2.5-flash' in nome and 'vision' not in nome and '8b' not in nome:
-                MODELOS_CACHEADOS[chave] = m.name.split('/')[-1]
-                return MODELOS_CACHEADOS[chave]
-        for m in models:
-            nome = m.name.lower()
-            if 'flash' in nome and 'vision' not in nome and '8b' not in nome:
-                MODELOS_CACHEADOS[chave] = m.name.split('/')[-1]
-                return MODELOS_CACHEADOS[chave]
-    except:
-        pass
+        models = list(client.models.list())
+        # Preferência: 2.5-flash → 1.5-flash → 1.5-pro
+        for preferido in ['2.5-flash', '1.5-flash', '1.5-pro']:
+            for m in models:
+                nome = m.name.lower()
+                if preferido in nome and 'vision' not in nome and '8b' not in nome:
+                    modelo = m.name.split('/')[-1]
+                    MODELOS_CACHEADOS[chave] = modelo
+                    return modelo
+    except Exception as e:
+        print(f"   ⚠️ Não conseguiu listar modelos: {e}")
+    # Fallback seguro
     return "gemini-1.5-flash"
 
-def padronizar_valores(dados):
-    mapeamento_padroes = {
-        "CLIENTE": "CLIENTES",
-        "VALOR": "VALOR DA NF",
-        "PESO": "PESO DA MERCADORIA KG",
-        "PESO KG": "PESO DA MERCADORIA KG",
-        "NF": "NOTAS FISCAIS",
-        "NOTA FISCAL": "NOTAS FISCAIS",
-        "NAVIO": "NAVIO/VIAGEM ARMADOR",
-        "VIAGEM": "NAVIO/VIAGEM ARMADOR",
-    }
-    
-    dados_padronizados = {}
-    for chave_esperada in COLUNAS:
-        dados_padronizados[chave_esperada] = ""
 
+def padronizar_valores(dados):
+    mapeamento = {
+        "CLIENTE":           "CLIENTES",
+        "VALOR":             "VALOR DA NF",
+        "PESO":              "PESO DA MERCADORIA KG",
+        "PESO KG":           "PESO DA MERCADORIA KG",
+        "NF":                "NOTAS FISCAIS",
+        "NOTA FISCAL":       "NOTAS FISCAIS",
+        "NAVIO":             "NAVIO/VIAGEM ARMADOR",
+        "VIAGEM":            "NAVIO/VIAGEM ARMADOR",
+        "DATA EMBARQUE":     "DATA DE EMBARQUE",
+        "EMBARQUE":          "DATA DE EMBARQUE",
+    }
+    resultado = {col: "" for col in COLUNAS}
     for chave, valor in dados.items():
-        chave_upper = chave.upper().strip()
-        chave_final = mapeamento_padroes.get(chave_upper, chave_upper)
-        if chave_final in COLUNAS:
-            if isinstance(valor, str):
-                dados_padronizados[chave_final] = valor.strip().upper()
-            else:
-                dados_padronizados[chave_final] = str(valor).upper() if valor is not None else ""
-                
-    return dados_padronizados
+        k = chave.upper().strip()
+        k_final = mapeamento.get(k, k)
+        if k_final in COLUNAS:
+            resultado[k_final] = str(valor).strip().upper() if valor is not None else ""
+    return resultado
+
 
 def normalizar_item(item):
+    """Converte listas para string separada por vírgula."""
     for k, v in item.items():
         if isinstance(v, list):
             item[k] = ", ".join([str(x) for x in v if x])
+        elif v is None:
+            item[k] = ""
     return item
 
-def limpeza_seguranca(texto_original, dados_extraidos):
-    if dados_extraidos.get("CONTAINER"):
-        cont = str(dados_extraidos["CONTAINER"]).replace(" ", "").replace("-", "")
+
+def limpeza_seguranca(texto_original, dados):
+    # Valida formato do container
+    if dados.get("CONTAINER"):
+        cont = re.sub(r'[\s\-]', '', str(dados["CONTAINER"]))
         if not re.match(r'^[A-Z]{4}\d{7}$', cont):
-            dados_extraidos["CONTAINER"] = ""
-            match_real = re.search(r'[A-Z]{4}\s*-?\s*\d{7}', texto_original)
-            if match_real:
-                dados_extraidos["CONTAINER"] = match_real.group(0).replace(" ", "").replace("-", "")
-    
-    if dados_extraidos.get("VALOR DA NF"):
-        v = str(dados_extraidos["VALOR DA NF"]).replace("R$", "").strip()
-        if v:
-            v = v.replace(".", "").replace(",", ".")
-            try:
-                valor_float = float(v)
-                dados_extraidos["VALOR DA NF"] = f"R$ {valor_float:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-            except:
-                dados_extraidos["VALOR DA NF"] = ""
-                
-    return dados_extraidos
+            dados["CONTAINER"] = ""
+            match = re.search(r'[A-Z]{4}\s*-?\s*\d{7}', texto_original)
+            if match:
+                dados["CONTAINER"] = re.sub(r'[\s\-]', '', match.group(0))
+
+    # Formata valor monetário
+    if dados.get("VALOR DA NF"):
+        v = re.sub(r'[R$\s]', '', str(dados["VALOR DA NF"]))
+        v = v.replace(".", "").replace(",", ".") if "," in v else v
+        try:
+            vf = float(v)
+            dados["VALOR DA NF"] = f"R$ {vf:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        except:
+            dados["VALOR DA NF"] = ""
+
+    return dados
+
 
 def extrair_com_ia(texto):
     if not texto or len(texto.strip()) < 10:
         return []
 
-    _indice_chave_atual = 0
+    prompt = f"""
+Você é um assistente de logística portuária especializado em extrair dados de documentos fiscais.
 
-    while _indice_chave_atual < len(LISTA_CHAVES_GEMINI):
-        chave_atual = LISTA_CHAVES_GEMINI[_indice_chave_atual]
-        client = genai.Client(api_key=chave_atual)
-        modelo_escolhido = listar_modelo_disponivel(client, chave_atual)
+Extraia APENAS os campos abaixo do documento. Para cada campo não encontrado, use string vazia "".
 
-        prompt = f"""
-        Você é um assistente de logística portuária. Extraia os seguintes campos do documento:
-        - CLIENTES (Nome da empresa destino/recebedor)
-        - DESTINO (Cidade/Estado destino)
-        - BOOKING
-        - NAVIO/VIAGEM ARMADOR
-        - VALOR DA NF (Apenas números)
-        - PESO DA MERCADORIA KG
-        - NOTAS FISCAIS
-        - CT-E ARMADOR
-        - CONTAINER (Exatamente 4 Letras e 7 Números. Ex: MEDU1234567)
-        - TIPO
-        - LACRE
-        - DATA DE EMBARQUE
-        - DEADLINE
+Campos obrigatórios:
+- CLIENTES: Nome completo da empresa destinatária/recebedora
+- DESTINO: Cidade e Estado (ex: "São Paulo/SP")
+- BOOKING: Número do booking/reserva
+- NAVIO/VIAGEM ARMADOR: Nome do navio + número da viagem
+- VALOR DA NF: Valor total em R$ (apenas números e vírgula)
+- PESO DA MERCADORIA KG: Peso bruto em kg
+- NOTAS FISCAIS: Números das NFs separados por vírgula
+- CT-E ARMADOR: Número do CT-e do armador
+- CONTAINER: Exatamente 4 letras maiúsculas + 7 dígitos (ex: MSCU1234567). Se houver múltiplos, retorne lista de objetos
+- TIPO: Tipo do container (ex: 20GP, 40HC)
+- LACRE: Número do lacre
+- DATA DE EMBARQUE: Data no formato DD/MM/AAAA
+- DEADLINE: Data limite no formato DD/MM/AAAA
 
-        IMPORTANTE:
-        Se houver MULTIPLOS CONTÊINERES no mesmo documento (ex: um packing list ou CTe com 2 ou mais contêineres listados), 
-        você DEVE criar uma lista JSON com múltiplos objetos. Faça um objeto para CADA contêiner encontrado.
+REGRAS IMPORTANTES:
+1. Se o documento tiver MÚLTIPLOS CONTÊINERES, retorne uma LISTA JSON com um objeto por contêiner
+2. Retorne APENAS JSON puro sem markdown, sem ```json, sem explicações
+3. Não invente dados — use "" para campos ausentes
 
-        Retorne APENAS um JSON puro (objeto único ou lista de objetos). Não use markdown.
-        Documento:
-        {texto}
-        """
+Documento:
+{texto[:8000]}
+"""
 
+    indice = 0
+    while indice < len(LISTA_CHAVES_GEMINI):
+        chave = LISTA_CHAVES_GEMINI[indice]
         try:
+            client = genai.Client(api_key=chave)
+            modelo = listar_modelo_disponivel(client, chave)
+
             response = client.models.generate_content(
-                model=modelo_escolhido,
+                model=modelo,
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     temperature=0.0,
@@ -129,18 +134,34 @@ def extrair_com_ia(texto):
             )
 
             raw = response.text.strip()
-            raw = re.sub(r'^```json\s*', '', raw, flags=re.IGNORECASE)
+            # Remove blocos de código markdown se a API retornar assim mesmo
+            raw = re.sub(r'^```(?:json)?\s*', '', raw, flags=re.IGNORECASE)
             raw = re.sub(r'\s*```$', '', raw)
+            raw = raw.strip()
 
-            parsed = json.loads(raw)
+            # Tenta parsear o JSON
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError as je:
+                # Tenta extrair JSON da resposta mesmo com texto extra
+                match = re.search(r'(\[.*\]|\{.*\})', raw, re.DOTALL)
+                if match:
+                    parsed = json.loads(match.group(1))
+                else:
+                    print(f"   ⚠️ JSON inválido da IA: {je}. Raw: {raw[:200]}")
+                    indice += 1
+                    continue
 
+            # Normaliza para lista
             if isinstance(parsed, dict):
                 lista = [normalizar_item(parsed)]
             elif isinstance(parsed, list):
                 lista = [normalizar_item(item) for item in parsed if isinstance(item, dict)]
             else:
+                indice += 1
                 continue
 
+            # Padroniza e limpa
             lista_final = []
             for item in lista:
                 item = padronizar_valores(item)
@@ -149,19 +170,19 @@ def extrair_com_ia(texto):
 
             if lista_final:
                 if len(lista_final) > 1:
-                    print(f"    🔀 Multi-contêiner detectado pela IA: {len(lista_final)} contêineres")
+                    print(f"    🔀 Multi-contêiner: {len(lista_final)} detectados pela IA")
                 return lista_final
 
         except Exception as e:
-            erro_str = str(e).upper()
-            erros_temporarios = ["429", "503", "500", "RESOURCE_EXHAUSTED", "UNAVAILABLE", "OVERLOAD", "INTERNAL"]
-            if any(termo in erro_str for termo in erros_temporarios):
-                print(f"   🔄 Chave API {_indice_chave_atual + 1} sobrecarregada/erro. Trocando de chave...")
-                _indice_chave_atual += 1
-                time.sleep(2)
+            erro = str(e).upper()
+            erros_temp = ["429", "503", "500", "RESOURCE_EXHAUSTED", "UNAVAILABLE", "OVERLOAD", "INTERNAL"]
+            if any(t in erro for t in erros_temp):
+                print(f"   🔄 Chave {indice + 1} sobrecarregada. Trocando...")
+                indice += 1
+                time.sleep(3)
             else:
-                print(f"   ❌ Erro do Gemini: {e}")
+                print(f"   ❌ Erro da API Gemini: {e}")
                 return []
-                
-    print("   ❌ Todas as chaves da API falharam ou estão sobrecarregadas.")
+
+    print("   ❌ Todas as chaves falharam ou estão sobrecarregadas.")
     return []

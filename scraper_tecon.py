@@ -1,24 +1,20 @@
-import os
-import sys
 from playwright.sync_api import sync_playwright
 import time
 import unicodedata
 import base64
-import io
 import re
-import PyPDF2
-import requests
-import fitz
-import pytesseract
+import os
 import tempfile
-from PIL import Image
+import requests
 from datetime import datetime
+from colorama import init, Fore, Style
 
-# Imports diretos da arquitetura raiz
+# Importações da arquitetura atual
 from config import TECON_CPF, TECON_SENHA, HEADLESS, CNPJ_TRANSPORTADORA
 from buscador_pdfs import encontrar_pasta_container, classificar_e_extrair_pdfs
+from extrator_pdf import extrair_texto_pdf
 
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\tesseract\tesseract.exe"
+init(autoreset=True)
 
 def remover_acentos(texto):
     if not texto: return ""
@@ -46,6 +42,41 @@ def fechar_popups_tecon(page):
                 time.sleep(0.5)
         page.keyboard.press("Escape")
     except: pass 
+
+def limpar_conteineres_extras(page, container_alvo):
+    print(Fore.YELLOW + f"   ⏳ CT-e Multi-contêiner: Removendo carga extra (Mantendo apenas {container_alvo})...")
+    try:
+        page.evaluate(f"""
+            const alvo = '{container_alvo}'.replace(/\\s/g, '').toUpperCase();
+            const botoes = document.querySelectorAll("a[data-ng-click*='removeContainer']");
+            
+            botoes.forEach(btn => {{
+                let parent = btn.parentElement;
+                let meuInput = null;
+                while (parent && parent.tagName !== 'BODY') {{
+                    let inputs = parent.querySelectorAll("input[name='containerNbr']");
+                    if (inputs.length === 1) {{
+                        meuInput = inputs[0]; 
+                        break;
+                    }} else if (inputs.length > 1) {{
+                        break; 
+                    }}
+                    parent = parent.parentElement;
+                }}
+                if (meuInput) {{
+                    let valor = meuInput.value.replace(/\\s/g, '').toUpperCase();
+                    if (!valor.includes(alvo)) {{
+                        btn.click(); 
+                    }}
+                }} else {{
+                    btn.click();
+                }}
+            }});
+        """)
+        time.sleep(3) 
+        print(Fore.GREEN + f"   ✅ Limpeza concluída. Lista pronta!")
+    except Exception as e:
+        print(Fore.RED + f"   ⚠️ Falha ao tentar limpar a lista: {e}")
 
 # =========================================================
 # FASE 1: CONSULTAR SE CHEGOU NO PORTO
@@ -117,16 +148,27 @@ def solicitar_passes_tecon(lista_containers):
                 for numero in lista_containers:
                     if resultados.get(numero) == "SOLICITADO":
                         continue
-                        
+
                     print(f"\n🚀 Fase 2 | Iniciando faturamento de: {numero}")
-                    pasta = encontrar_pasta_container(numero)
+                    try:
+                        pasta = encontrar_pasta_container(numero)
+                    except Exception as e:
+                        print(Fore.RED + f"   ❌ Erro ao buscar pasta de {numero}: {e}")
+                        resultados[numero] = "ERRO"
+                        continue
+
                     if not pasta:
                         print(f"   ⚠️ Pasta não encontrada. Aguardando documentos.")
                         resultados[numero] = "SEM_ARQUIVOS"
                         continue
-                        
-                    nfs, ctes = classificar_e_extrair_pdfs(pasta)
-                    
+
+                    try:
+                        nfs, ctes = classificar_e_extrair_pdfs(pasta)
+                    except Exception as e:
+                        print(Fore.RED + f"   ❌ Erro ao classificar PDFs de {numero}: {e}")
+                        resultados[numero] = "ERRO"
+                        continue
+
                     if not nfs or not ctes:
                         faltando = []
                         if not nfs: faltando.append("Nota Fiscal (NF)")
@@ -182,6 +224,8 @@ def solicitar_passes_tecon(lista_containers):
                             page.locator("button.swal2-confirm:has-text('OK'):visible").click(timeout=3000)
                             time.sleep(1)
                         except: pass
+
+                        limpar_conteineres_extras(page, numero)
                         
                         texto_tela_upper = page.locator("body").inner_text().upper()
                         todos_conteineres = set(re.findall(r'\b[A-Z]{4}\d{7}\b', texto_tela_upper))
@@ -254,14 +298,16 @@ def solicitar_passes_tecon(lista_containers):
                         time.sleep(2) 
                         
                     except Exception as e:
+                        print(Fore.RED + f"   ❌ Erro no faturamento de {numero}: {e}")
                         resultados[numero] = "ERRO"
-        except Exception as e: pass
+        except Exception as e:
+            print(Fore.RED + f"❌ Erro crítico Fase 2: {e}")
         finally:
             browser.close()
             return resultados
 
 # =========================================================
-# FASE 3: LEITURA DE DOWNLOADS INVISÍVEIS (A SOLUÇÃO DEFINITIVA)
+# FASE 3: LEITURA DE PDF INVISÍVEL COM REGRA ESTRITA DE EXPIRAÇÃO
 # =========================================================
 def verificar_passes_aprovados(lista_containers):
     resultados_fase3 = {}
@@ -269,7 +315,8 @@ def verificar_passes_aprovados(lista_containers):
     
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=HEADLESS)
-        page = browser.new_page()
+        context = browser.new_context()
+        page = context.new_page()
         
         try:
             if login_tecon(page):
@@ -287,8 +334,6 @@ def verificar_passes_aprovados(lista_containers):
                         time.sleep(1)
                         
                         page.locator("button[data-ng-click='getPartialFilter(filter)']").click()
-                        
-                        print(f"   ⏳ Aguardando atualização do Tecon...")
                         time.sleep(5)
                         
                         primeira_linha = page.locator("table tbody tr").first
@@ -298,7 +343,6 @@ def verificar_passes_aprovados(lista_containers):
                             continue
                             
                         texto_linha = primeira_linha.inner_text().upper()
-                        
                         linha_display = texto_linha.replace('\n', ' | ').strip()
                         print(f"   👀 Status lido na tela: {linha_display}")
                         
@@ -308,10 +352,10 @@ def verificar_passes_aprovados(lista_containers):
                             with page.expect_popup() as aba_atend_info:
                                 primeira_linha.locator("a[data-ui-sref*='visualizar']").click()
                             aba_atend = aba_atend_info.value
-                            
                             aba_atend.wait_for_load_state("load")
                             time.sleep(4) 
                             
+                            # CÓDIGO MELHORADO: Usa tanto o ícone zmdi-download quanto o fa-file-pdf
                             qtd_botoes = aba_atend.evaluate("""() => {
                                 let btns = [];
                                 document.querySelectorAll('button').forEach(b => {
@@ -325,67 +369,103 @@ def verificar_passes_aprovados(lista_containers):
                                 return btns.length;
                             }""")
                             
-                            if qtd_botoes == 0:
-                                print("   ⚠️ Nenhum botão de download de PDF encontrado na tela.")
-                                resultados_fase3[numero] = "FINALIZADO (DATA NÃO LIDA)"
-                                aba_atend.close()
-                                continue
-                                
                             data_vencimento = None
                             
-                            for i in range(qtd_botoes):
-                                print(f"   📄 Lendo Documento {i+1} de {qtd_botoes}...")
-                                try:
-                                    # Abre o PDF em uma nova aba
-                                    with aba_atend.context.expect_page(timeout=15000) as page_info:
+                            if qtd_botoes == 0:
+                                print("   ⚠️ Nenhum botão de PDF encontrado na tela.")
+                            else:
+                                for i in range(qtd_botoes):
+                                    print(f"   📄 Intercetando PDF do documento {i+1}...")
+                                    try:
+                                        download_obj = []
+                                        page_obj = []
+                                        
+                                        aba_atend.once("download", lambda d: download_obj.append(d))
+                                        aba_atend.context.once("page", lambda p: page_obj.append(p))
+                                        
                                         aba_atend.locator(f"#botao-baixar-pdf-{i}").click()
+                                        
+                                        for _ in range(15):
+                                            if download_obj or page_obj: break
+                                            time.sleep(1)
+                                            
+                                        caminho_temp = os.path.join(tempfile.gettempdir(), f"tecon_{int(time.time())}.pdf")
+                                        texto_extraido = ""
+                                        
+                                        if download_obj:
+                                            download_obj[0].save_as(caminho_temp)
+                                            texto_extraido = extrair_texto_pdf(caminho_temp)
+                                            
+                                        elif page_obj:
+                                            nova_aba = page_obj[0]
+                                            time.sleep(2)
+                                            url = nova_aba.url
+                                            
+                                            # Captura da imagem via Blob ou Link direto
+                                            if url.startswith("blob:"):
+                                                pdf_b64 = aba_atend.evaluate(f"""async () => {{
+                                                    try {{
+                                                        const res = await fetch('{url}');
+                                                        const blob = await res.blob();
+                                                        return await new Promise(resolve => {{
+                                                            const reader = new FileReader();
+                                                            reader.onloadend = () => resolve(reader.result);
+                                                            reader.readAsDataURL(blob);
+                                                        }});
+                                                    }} catch(e) {{ return null; }}
+                                                }}""")
+                                                if pdf_b64:
+                                                    with open(caminho_temp, "wb") as f:
+                                                        f.write(base64.b64decode(pdf_b64.split(",")[1]))
+                                            else:
+                                                cookies = context.cookies()
+                                                session = requests.Session()
+                                                for c in cookies:
+                                                    session.cookies.set(c['name'], c['value'], domain=c['domain'], path=c['path'])
+                                                res = session.get(url)
+                                                with open(caminho_temp, "wb") as f:
+                                                    f.write(res.content)
+                                                    
+                                            nova_aba.close()
+                                            
+                                            if os.path.exists(caminho_temp):
+                                                texto_extraido = extrair_texto_pdf(caminho_temp)
+                                        
+                                        try: os.remove(caminho_temp)
+                                        except: pass
+                                        
+                                        texto_limpo = re.sub(r'\s+', ' ', texto_extraido).strip()
+                                        if texto_limpo:
+                                            # Reduzindo o print do texto bruto para não poluir demais o terminal
+                                            display_text = texto_limpo[:300] + "..." if len(texto_limpo) > 300 else texto_limpo
+                                            print(Fore.CYAN + f"   📝 LIDO: {display_text}")
+                                            
+                                            # =======================================================
+                                            # FIX: AGORA SÓ PROCURA EXATAMENTE POR 'EXPIRAÇÃO'
+                                            # =======================================================
+                                            padroes_data = [
+                                                r"EXPIRA[CÇ][AÃ]?O\s*[:\-]?\s*(\d{2}[/\-]\d{2}[/\-]\d{4})",
+                                                r"DATA\s*(?:DE\s+)?EXPIRA[CÇ][AÃ]?O\s*[:\-]?\s*(\d{2}[/\-]\d{2}[/\-]\d{4})",
+                                                r"EXPIRA\s*[:\-]?\s*(\d{2}[/\-]\d{2}[/\-]\d{4})"
+                                            ]
 
-                                    nova_aba = page_info.value
-                                    nova_aba.wait_for_load_state("load", timeout=15000)
-                                    time.sleep(2)  # Aguarda o PDF renderizar
-
-                                    # Tira screenshot e usa OCR
-                                    screenshot_bytes = nova_aba.screenshot(type="jpeg", quality=100)
-                                    img = Image.open(io.BytesIO(screenshot_bytes))
-
-                                    # Amplia a imagem para melhor OCR
-                                    largura, altura = img.size
-                                    img_ampliada = img.resize((largura * 2, altura * 2), Image.Resampling.LANCZOS)
-
-                                    texto_pdf = pytesseract.image_to_string(img_ampliada, lang="por")
-                                    print(f"   📝 OCR: {texto_pdf[:200]}...")
-
-                                    nova_aba.close()
-
-                                    # 🎯 BUSCA A DATA DE EXPIRAÇÃO
-                                    texto_limpo = re.sub(r'\s+', ' ', texto_pdf.upper())
-                                    padroes_data = [
-                                        r"EXPIRA[CÇ][AÃ]O\s*[:\-]?\s*(\d{2}[/\-]\d{2}[/\-]\d{4})",
-                                        r"VENCIMENTO\s*[:\-]?\s*(\d{2}[/\-]\d{2}[/\-]\d{4})",
-                                        r"VALIDADE\s*[:\-]?\s*(\d{2}[/\-]\d{2}[/\-]\d{4})",
-                                        r"V[ÁA]LIDO\s*(?:AT[ÉE]?\s*)?[:\-]?\s*(\d{2}[/\-]\d{2}[/\-]\d{4})",
-                                        r"EXPIRA\s*[:\-]?\s*(\d{2}[/\-]\d{2}[/\-]\d{4})",
-                                        r"DATA\s*(?:DE\s+)?EXPIRA[CÇ][AÃ]O\s*[:\-]?\s*(\d{2}[/\-]\d{2}[/\-]\d{4})",
-                                    ]
-
-                                    for padrao in padroes_data:
-                                        match = re.search(padrao, texto_limpo, re.IGNORECASE)
-                                        if match:
-                                            data_vencimento = match.group(1).replace('-', '/')
-                                            print(f"   ✅ Data encontrada: {data_vencimento}")
-                                            break
-
-                                    if data_vencimento:
-                                        break
-
-                                except Exception as e:
-                                    print(f"   ❌ Erro ao analisar o doc {i+1}: {type(e).__name__}: {e}")
+                                            for padrao in padroes_data:
+                                                match = re.search(padrao, texto_limpo, re.IGNORECASE)
+                                                if match:
+                                                    data_vencimento = match.group(1).replace('-', '/')
+                                                    break 
+                                        
+                                        if data_vencimento:
+                                            break 
+                                        
+                                    except Exception as e:
+                                        print(Fore.RED + f"   ⚠️ Erro ao analisar o documento {i+1}: {e}")
                             
                             if data_vencimento:
                                 resultados_fase3[numero] = f"PASSE VENCE {data_vencimento}"
-                                print(f"   🎯 BINGO! {resultados_fase3[numero]}")
+                                print(Fore.GREEN + f"   🎯 BINGO! {resultados_fase3[numero]}")
                             else:
-                                print("   ⚠️ Nenhum dos PDFs baixados continha a palavra EXPIRAÇÃO.")
+                                print(Fore.YELLOW + "   ⚠️ Nenhum documento retornou a palavra EXPIRAÇÃO.")
                                 resultados_fase3[numero] = "FINALIZADO (DATA NÃO LIDA)"
                                 
                             aba_atend.close()
