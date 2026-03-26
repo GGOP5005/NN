@@ -6,13 +6,17 @@ import re
 import os
 import tempfile
 import requests
+import fitz
+import pytesseract
+from PIL import Image
 from datetime import datetime
 from colorama import init, Fore, Style
-
-# Importações da arquitetura atual
 from config import TECON_CPF, TECON_SENHA, HEADLESS, CNPJ_TRANSPORTADORA
 from buscador_pdfs import encontrar_pasta_container, classificar_e_extrair_pdfs
 from extrator_pdf import extrair_texto_pdf
+
+# Caminho absoluto do Tesseract no Windows
+pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\tesseract\tesseract.exe"
 
 init(autoreset=True)
 
@@ -148,27 +152,16 @@ def solicitar_passes_tecon(lista_containers):
                 for numero in lista_containers:
                     if resultados.get(numero) == "SOLICITADO":
                         continue
-
+                        
                     print(f"\n🚀 Fase 2 | Iniciando faturamento de: {numero}")
-                    try:
-                        pasta = encontrar_pasta_container(numero)
-                    except Exception as e:
-                        print(Fore.RED + f"   ❌ Erro ao buscar pasta de {numero}: {e}")
-                        resultados[numero] = "ERRO"
-                        continue
-
+                    pasta = encontrar_pasta_container(numero)
                     if not pasta:
                         print(f"   ⚠️ Pasta não encontrada. Aguardando documentos.")
                         resultados[numero] = "SEM_ARQUIVOS"
                         continue
-
-                    try:
-                        nfs, ctes = classificar_e_extrair_pdfs(pasta)
-                    except Exception as e:
-                        print(Fore.RED + f"   ❌ Erro ao classificar PDFs de {numero}: {e}")
-                        resultados[numero] = "ERRO"
-                        continue
-
+                        
+                    nfs, ctes = classificar_e_extrair_pdfs(pasta)
+                    
                     if not nfs or not ctes:
                         faltando = []
                         if not nfs: faltando.append("Nota Fiscal (NF)")
@@ -298,16 +291,14 @@ def solicitar_passes_tecon(lista_containers):
                         time.sleep(2) 
                         
                     except Exception as e:
-                        print(Fore.RED + f"   ❌ Erro no faturamento de {numero}: {e}")
                         resultados[numero] = "ERRO"
-        except Exception as e:
-            print(Fore.RED + f"❌ Erro crítico Fase 2: {e}")
+        except Exception as e: pass
         finally:
             browser.close()
             return resultados
 
 # =========================================================
-# FASE 3: LEITURA DE PDF INVISÍVEL COM REGRA ESTRITA DE EXPIRAÇÃO
+# FASE 3: LEITURA DE PDF INVISÍVEL COM FALLBACK DE PRINT
 # =========================================================
 def verificar_passes_aprovados(lista_containers):
     resultados_fase3 = {}
@@ -315,7 +306,7 @@ def verificar_passes_aprovados(lista_containers):
     
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=HEADLESS)
-        context = browser.new_context()
+        context = browser.new_context(viewport={'width': 1920, 'height': 1080})
         page = context.new_page()
         
         try:
@@ -355,7 +346,6 @@ def verificar_passes_aprovados(lista_containers):
                             aba_atend.wait_for_load_state("load")
                             time.sleep(4) 
                             
-                            # CÓDIGO MELHORADO: Usa tanto o ícone zmdi-download quanto o fa-file-pdf
                             qtd_botoes = aba_atend.evaluate("""() => {
                                 let btns = [];
                                 document.querySelectorAll('button').forEach(b => {
@@ -398,10 +388,10 @@ def verificar_passes_aprovados(lista_containers):
                                             
                                         elif page_obj:
                                             nova_aba = page_obj[0]
-                                            time.sleep(2)
+                                            time.sleep(3) # Tempo extra para o PDF renderizar visualmente
                                             url = nova_aba.url
                                             
-                                            # Captura da imagem via Blob ou Link direto
+                                            # Tentativa 1: Extração digital do blob ou link
                                             if url.startswith("blob:"):
                                                 pdf_b64 = aba_atend.evaluate(f"""async () => {{
                                                     try {{
@@ -418,31 +408,45 @@ def verificar_passes_aprovados(lista_containers):
                                                     with open(caminho_temp, "wb") as f:
                                                         f.write(base64.b64decode(pdf_b64.split(",")[1]))
                                             else:
-                                                cookies = context.cookies()
-                                                session = requests.Session()
-                                                for c in cookies:
-                                                    session.cookies.set(c['name'], c['value'], domain=c['domain'], path=c['path'])
-                                                res = session.get(url)
-                                                with open(caminho_temp, "wb") as f:
-                                                    f.write(res.content)
+                                                try:
+                                                    cookies = context.cookies()
+                                                    session = requests.Session()
+                                                    for c in cookies:
+                                                        session.cookies.set(c['name'], c['value'], domain=c['domain'], path=c['path'])
+                                                    res = session.get(url, timeout=10)
+                                                    if res.status_code == 200:
+                                                        with open(caminho_temp, "wb") as f:
+                                                            f.write(res.content)
+                                                except: pass
                                                     
-                                            nova_aba.close()
-                                            
                                             if os.path.exists(caminho_temp):
                                                 texto_extraido = extrair_texto_pdf(caminho_temp)
+                                                
+                                            # PLANO B ABSOLUTO: Se o documento veio em branco ou inacessível
+                                            if not texto_extraido.strip():
+                                                print(Fore.YELLOW + "   ⚠️ PDF inacessível/vazio. Recorrendo à Visão Computacional direto na Aba...")
+                                                caminho_print = os.path.join(tempfile.gettempdir(), f"tecon_print_{int(time.time())}.png")
+                                                nova_aba.screenshot(path=caminho_print, full_page=True)
+                                                
+                                                try:
+                                                    img = Image.open(caminho_print).convert('L')
+                                                    texto_extraido = pytesseract.image_to_string(img, lang="por", config="--psm 6")
+                                                except:
+                                                    texto_extraido = pytesseract.image_to_string(Image.open(caminho_print), config="--psm 6")
+                                                    
+                                                try: os.remove(caminho_print)
+                                                except: pass
+                                                
+                                            nova_aba.close()
                                         
                                         try: os.remove(caminho_temp)
                                         except: pass
                                         
                                         texto_limpo = re.sub(r'\s+', ' ', texto_extraido).strip()
                                         if texto_limpo:
-                                            # Reduzindo o print do texto bruto para não poluir demais o terminal
                                             display_text = texto_limpo[:300] + "..." if len(texto_limpo) > 300 else texto_limpo
                                             print(Fore.CYAN + f"   📝 LIDO: {display_text}")
                                             
-                                            # =======================================================
-                                            # FIX: AGORA SÓ PROCURA EXATAMENTE POR 'EXPIRAÇÃO'
-                                            # =======================================================
                                             padroes_data = [
                                                 r"EXPIRA[CÇ][AÃ]?O\s*[:\-]?\s*(\d{2}[/\-]\d{2}[/\-]\d{4})",
                                                 r"DATA\s*(?:DE\s+)?EXPIRA[CÇ][AÃ]?O\s*[:\-]?\s*(\d{2}[/\-]\d{2}[/\-]\d{4})",
@@ -454,6 +458,8 @@ def verificar_passes_aprovados(lista_containers):
                                                 if match:
                                                     data_vencimento = match.group(1).replace('-', '/')
                                                     break 
+                                        else:
+                                            print(Fore.RED + "   ❌ LIDO: [FALHA - DOCUMENTO COMPLETAMENTE EM BRANCO]")
                                         
                                         if data_vencimento:
                                             break 

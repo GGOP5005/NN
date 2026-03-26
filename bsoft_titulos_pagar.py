@@ -439,7 +439,7 @@ def buscar_cliente_via_contrato(page, context, numero_titulo):
     """
     if not numero_titulo:
         print(Fore.RED + "   ❌ Número do título vazio.")
-        return ""
+        return "", ""
 
     print(Fore.WHITE + f"   🔗 Buscando cliente via contrato #{numero_titulo}...")
     aba_contrato = None
@@ -584,7 +584,7 @@ def buscar_cliente_via_contrato(page, context, numero_titulo):
             print(Fore.RED + "      ❌ CT-e não encontrado.")
             aba_contrato.close()
             aba_contrato = None
-            return ""
+            return "", ""
 
         # ── PASSO E: Abre CT-e na mesma aba via barra de pesquisa ────
         # Usa a barra de pesquisa do bsoft (drawer-menu__search-input)

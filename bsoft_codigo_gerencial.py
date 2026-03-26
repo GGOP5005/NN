@@ -151,7 +151,7 @@ def gerar_termos_busca(nome_completo):
     """
     # Palavras muito genéricas que causam ambiguidade — vão para o fim
     PALAVRAS_GENERICAS = {
-        'MADEIRAS', 'MADEIRA', 'COMERCIO', 'INDUSTRIA', 'TRANSPORTES',
+        'MADEIRAS', 'MADEIRA', 'MADEIREIRA', 'COMERCIO', 'INDUSTRIA', 'TRANSPORTES',
         'TRANSPORTE', 'SERVICOS', 'SERVICO', 'MATERIAIS', 'MATERIAL',
         'CONSTRUCAO', 'CONSTRUCOES', 'DISTRIBUICAO', 'DISTRIBUIDORA',
         'BRASIL', 'NORTE', 'NORDESTE', 'SUL', 'LESTE', 'OESTE',
@@ -222,13 +222,32 @@ def selecionar_melhor_opcao(opcoes_texto, valores_opcoes, nome_cliente, memoria)
     nome_upper = remover_acentos(nome_cliente)
     chave = chave_cliente(nome_cliente)
 
-    # Prioridade 1: Memória — escolha já confirmada anteriormente
+    # Prioridade 1: Memória — mas só usa se o nome memorizado é compatível com o cliente atual
     if chave in memoria:
-        codigo_memorizado = memoria[chave]
+        codigo_memorizado = str(memoria[chave])
         for i, (texto, valor) in enumerate(zip(opcoes_texto, valores_opcoes)):
-            if valor == codigo_memorizado or remover_acentos(texto) == remover_acentos(codigo_memorizado):
-                print(Fore.GREEN + f"      💾 Memória: usando '{texto}' (confirmado anteriormente)")
-                return i, texto, valor, "MEMÓRIA"
+            if str(valor) == codigo_memorizado or remover_acentos(texto) == remover_acentos(codigo_memorizado):
+                # Valida: pelo menos uma palavra específica do cliente atual
+                # aparece na descrição memorizada (evita confundir clientes homônimos)
+                termos_cliente = gerar_termos_busca(nome_cliente)
+                texto_norm = remover_acentos(texto)
+                bate = False
+                for t in termos_cliente[:5]:
+                    t_norm = remover_acentos(t)
+                    # Ignora termos genéricos curtos como "MADEIREIRA" sozinho
+                    if len(t_norm) >= 4 and t_norm in texto_norm:
+                        bate = True
+                        break
+                if bate:
+                    print(Fore.GREEN + f"      💾 Memória: usando '{texto}' (confirmado anteriormente)")
+                    return i, texto, valor, "MEMÓRIA"
+                else:
+                    print(Fore.YELLOW + f"      ⚠️ Memória '{texto}' não confere com cliente '{nome_cliente}' → ignorando")
+                    break
+        else:
+            # Código memorizado não apareceu nas opções atuais do dropdown
+            print(Fore.YELLOW + f"      ⚠️ Memória tem código {codigo_memorizado} mas não aparece nas opções → nova busca")
+            return -2, "", codigo_memorizado, "MEMÓRIA_REQUER_NOVA_BUSCA"
 
     # Coleta todas as opções que contêm RECEITA
     opcoes_receita = []
@@ -241,8 +260,30 @@ def selecionar_melhor_opcao(opcoes_texto, valores_opcoes, nome_cliente, memoria)
         i, texto = opcoes_receita[0]
         return i, texto, valores_opcoes[i], "RECEITA ÚNICA"
 
-    # Prioridade 3: Múltiplas opções com RECEITA → pergunta usuário
+    # Prioridade 3: Múltiplas opções com RECEITA
     if len(opcoes_receita) > 1:
+        # Tenta fuzzy entre as opções com RECEITA para auto-selecionar
+        if RAPIDFUZZ_OK:
+            termos = gerar_termos_busca(nome_cliente)
+            textos_r = [t for _, t in opcoes_receita]
+            for termo in termos:
+                resultados = fuzz_process.extract(
+                    remover_acentos(termo),
+                    [remover_acentos(t) for t in textos_r],
+                    scorer=fuzz.partial_ratio,
+                    limit=2
+                )
+                if resultados:
+                    melhor_score = resultados[0][1]
+                    # Auto-seleciona só se tiver margem clara sobre o segundo (>=15 pts)
+                    segundo_score = resultados[1][1] if len(resultados) > 1 else 0
+                    if melhor_score >= 70 and (melhor_score - segundo_score) >= 15:
+                        pos = resultados[0][2]
+                        i, texto = opcoes_receita[pos]
+                        print(Fore.CYAN + f"      🎯 Auto-seleção ({melhor_score}% vs {segundo_score}%): '{texto}'")
+                        return i, texto, valores_opcoes[i], f"Fuzzy auto {melhor_score}%"
+
+        # Ambiguidade — pausa e pergunta ao usuário
         idx_orig, texto_escolhido, valor_escolhido = confirmar_opcao_com_usuario(
             nome_cliente, opcoes_receita, opcoes_texto, valores_opcoes
         )
@@ -254,23 +295,29 @@ def selecionar_melhor_opcao(opcoes_texto, valores_opcoes, nome_cliente, memoria)
         print(Fore.GREEN + f"      💾 Memória salva: '{nome_cliente}' → '{texto_escolhido}'")
         return idx_orig, texto_escolhido, valor_escolhido, "CONFIRMADO PELO USUÁRIO"
 
-    # Prioridade 4: Nenhuma opção com RECEITA → fuzzy como último recurso
-    if RAPIDFUZZ_OK and opcoes_texto:
-        primeiro = primeiro_nome_cliente(nome_cliente)
-        resultados = fuzz_process.extract(
-            primeiro,
-            [remover_acentos(o) for o in opcoes_texto],
-            scorer=fuzz.partial_ratio,
-            limit=3
-        )
-        if resultados:
-            melhor_texto, melhor_score, melhor_idx = resultados[0]
-            if melhor_score >= 60:
-                return melhor_idx, opcoes_texto[melhor_idx], valores_opcoes[melhor_idx], f"Fuzzy {melhor_score}%"
-
-    # Última opção: primeira disponível
-    if opcoes_texto:
-        return 0, opcoes_texto[0], valores_opcoes[0], "PRIMEIRA DISPONÍVEL"
+    # Prioridade 4: Nenhuma opção com RECEITA → fuzzy APENAS em opções com RECEITA
+    # (nunca usa fuzzy em opções sem RECEITA para evitar matches errados)
+    if RAPIDFUZZ_OK:
+        termos = gerar_termos_busca(nome_cliente)
+        # Filtra só as que têm RECEITA no texto
+        opcoes_receita_fallback = [
+            (i, t) for i, t in enumerate(opcoes_texto)
+            if "RECEITA" in remover_acentos(t)
+        ]
+        if opcoes_receita_fallback:
+            idxs  = [i for i, _ in opcoes_receita_fallback]
+            textos_r = [t for _, t in opcoes_receita_fallback]
+            for termo in termos:
+                resultados = fuzz_process.extract(
+                    remover_acentos(termo),
+                    [remover_acentos(t) for t in textos_r],
+                    scorer=fuzz.partial_ratio,
+                    limit=1
+                )
+                if resultados and resultados[0][1] >= 60:
+                    pos = resultados[0][2]
+                    i   = idxs[pos]
+                    return i, opcoes_texto[i], valores_opcoes[i], f"Fuzzy RECEITA {resultados[0][1]}%"
 
     return -1, "", "", "NÃO ENCONTRADO"
 
@@ -494,12 +541,17 @@ def abrir_edicao_titulo(page, titulo_id):
             f"?rotina=finan_faturas_receber&OP=O3&id={titulo_id}"
         )
         print(Fore.WHITE + f"   🌐 Abrindo formulário: ...id={titulo_id}")
-        page.goto(url_form, timeout=30000)
+        page.goto(url_form, timeout=30000, wait_until="domcontentloaded")
+        # Aguarda o campo do cliente aparecer — confirma que o formulário
+        # carregou de verdade (não a tela anterior ainda em navegação)
         try:
-            page.wait_for_load_state("networkidle", timeout=15000)
-        except:
+            page.wait_for_selector(
+                "input[name='dados_cod_clienteAlteracao']",
+                timeout=12000
+            )
+        except Exception:
             pass
-        time.sleep(2)
+        time.sleep(1)
 
         # Diagnóstico: lista frames disponíveis
         frames = page.frames
@@ -707,7 +759,46 @@ def trocar_codigo_gerencial(frame, nome_cliente, memoria):
             textos_opcoes, valores_opcoes, nome_cliente, memoria
         )
 
-        if idx == -1:
+        # Código na memória não apareceu → faz nova pesquisa com o código diretamente
+        if idx == -2:
+            cod_mem = valor_escolhido  # é o código memorizado
+            print(Fore.WHITE + f"      🔄 Nova busca pelo código memorizado: {cod_mem}")
+            frame.evaluate(f"""() => {{
+                const campo = document.getElementById('{id_pesquisa}');
+                if (!campo) return;
+                let el = campo;
+                while (el && el !== document.body) {{
+                    if (el.style && el.style.display === 'none') el.style.display = '';
+                    if (el.style && el.style.visibility === 'hidden') el.style.visibility = '';
+                    el = el.parentElement;
+                }}
+                campo.value = '{cod_mem}';
+                const lupas = document.querySelectorAll(
+                    "i[name='botaoPesquisa_dados_grupoApropriador_apropGerencial_codigo']"
+                );
+                let prox = null, menorDist = Infinity;
+                lupas.forEach(l => {{
+                    const r1 = campo.getBoundingClientRect(), r2 = l.getBoundingClientRect();
+                    const d = Math.abs(r1.top-r2.top)+Math.abs(r1.left-r2.left);
+                    if (d < menorDist) {{ menorDist = d; prox = l; }}
+                }});
+                if (prox) prox.click();
+            }}""")
+            time.sleep(2.5)
+            opcoes_novas = frame.evaluate(f"""() => {{
+                const sel = document.getElementById('{id_select}');
+                if (!sel) return [];
+                return Array.from(sel.options)
+                    .filter(o => o.value && o.value !== '0' && !o.disabled && o.text.trim())
+                    .map(o => ({{value: o.value, text: o.text.trim()}}));
+            }}""")
+            textos_opcoes  = [o['text']  for o in opcoes_novas]
+            valores_opcoes = [o['value'] for o in opcoes_novas]
+            idx, opcao_escolhida, valor_escolhido, metodo = selecionar_melhor_opcao(
+                textos_opcoes, valores_opcoes, nome_cliente, memoria
+            )
+
+        if idx == -1 or idx == -2:
             print(Fore.YELLOW + f"      ⏭️ Pulado: {metodo}")
             return False, "", metodo
 
@@ -780,7 +871,12 @@ def salvar_titulo(frame):
         print(Fore.CYAN + f"      💾 Salvar: {resultado}")
 
         if resultado and resultado.get('ok'):
-            time.sleep(4)
+            # Aguarda a navegação que RG.postaalteracao dispara
+            try:
+                frame.page.wait_for_load_state("load", timeout=10000)
+            except Exception:
+                pass
+            time.sleep(2)
             return True
         print(Fore.YELLOW + f"      ⚠️ {resultado}")
         return False
