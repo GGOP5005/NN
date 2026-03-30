@@ -345,19 +345,31 @@ def coletar_ids_titulos(frame):
         print(Fore.WHITE + f"   📋 Coletando — página {pagina_num}...")
         time.sleep(2)
         try:
+            # Debug: mostra swni disponíveis na primeira linha (só na pág 1)
+            if pagina_num == 1:
+                swnis = frame.evaluate("""() => {
+                    const tr = document.querySelector('table tbody tr');
+                    if (!tr) return [];
+                    return Array.from(tr.querySelectorAll('td[swni]'))
+                        .map(td => td.getAttribute('swni') + '=' + td.innerText.trim().substring(0,20));
+                }""")
+                print(Fore.MAGENTA + f"   🔍 DEBUG swni: {swnis}")
             dados = frame.evaluate("""() => {
                 const resultado = [];
                 document.querySelectorAll('table tbody tr').forEach(tr => {
                     const cb = tr.querySelector('input[name="id"]');
                     const tdFornec = tr.querySelector('td[swni="fornecedor"]')
                                   || tr.querySelector('td[swni="cliente"]');
-                    // Número do talão fica em td[swni="numero"] na lista
                     const tdNumero = tr.querySelector('td[swni="numero"]');
+                    const tdData   = tr.querySelector('td[swni="data_de_emissao"]')
+                                  || tr.querySelector('td[swni="emissao"]')
+                                  || tr.querySelector('td[swni="data"]');
                     if (cb && cb.value) {
                         resultado.push({
                             id: cb.value,
                             fornecedor: tdFornec ? tdFornec.innerText.trim() : '',
-                            numero: tdNumero ? tdNumero.innerText.trim() : ''
+                            numero: tdNumero ? tdNumero.innerText.trim() : '',
+                            emissao: tdData ? tdData.innerText.trim() : ''
                         });
                     }
                 });
@@ -368,13 +380,38 @@ def coletar_ids_titulos(frame):
             novos = 0
             for item in dados:
                 tid = item['id']
-                if tid not in ids_vistos:
+                if tid in ids_vistos:
+                    continue
+                # Filtra títulos com data de emissão anterior a Jan/2026
+                emissao = item.get('emissao', '')
+                if emissao:
+                    try:
+                        # Formato DD/MM/YYYY
+                        partes = emissao.split('/')
+                        if len(partes) == 3:
+                            ano, mes = int(partes[2]), int(partes[1])
+                            if ano < 2026 or (ano == 2026 and mes < 1):
+                                print(Fore.WHITE + f"      ⏭️ #{tid} — emissão {emissao} (anterior a Jan/2026) — pulado")
+                                ids_vistos.add(tid)
+                                continue
+                    except Exception:
+                        pass
+                # Ignora linha de cabeçalho (texto literal em vez de dados)
+                fornec = item['fornecedor'].strip().lower()
+                emissao_chk = emissao.strip().lower()
+                if fornec in ('fornecedor', 'cliente', '') or emissao_chk in ('data de emissão', 'data de emissao', ''):
                     ids_vistos.add(tid)
-                    titulos.append({"codigo": tid, "fornecedor": item['fornecedor'], "numero": item.get('numero', '')})
-                    print(Fore.WHITE + f"      #{tid} — {item['fornecedor']} — nº {item.get('numero','?')}")
-                    novos += 1
+                    continue
+                ids_vistos.add(tid)
+                titulos.append({"codigo": tid, "fornecedor": item['fornecedor'], "numero": item.get('numero', '')})
+                print(Fore.WHITE + f"      #{tid} — {item['fornecedor']} — nº {item.get('numero','?')} — {emissao}")
+                novos += 1
             if novos == 0: break
+            # Botão próxima página — tenta múltiplos seletores
             btn_prox = frame.locator("a[title='Próxima página']").first
+            if btn_prox.count() == 0 or not btn_prox.is_visible():
+                # Fallback: ícone fa-caret-right dentro de link
+                btn_prox = frame.locator("a:has(i.fa-caret-right), a:has(.fa-caret-right)").last
             if btn_prox.count() > 0 and btn_prox.is_visible():
                 btn_prox.click(); pagina_num += 1; time.sleep(2)
             else:
@@ -439,7 +476,7 @@ def buscar_cliente_via_contrato(page, context, numero_titulo):
     """
     if not numero_titulo:
         print(Fore.RED + "   ❌ Número do título vazio.")
-        return "", ""
+        return ""
 
     print(Fore.WHITE + f"   🔗 Buscando cliente via contrato #{numero_titulo}...")
     aba_contrato = None
@@ -584,7 +621,7 @@ def buscar_cliente_via_contrato(page, context, numero_titulo):
             print(Fore.RED + "      ❌ CT-e não encontrado.")
             aba_contrato.close()
             aba_contrato = None
-            return "", ""
+            return ""
 
         # ── PASSO E: Abre CT-e na mesma aba via barra de pesquisa ────
         # Usa a barra de pesquisa do bsoft (drawer-menu__search-input)

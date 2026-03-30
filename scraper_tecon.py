@@ -1,24 +1,24 @@
+import os
+import sys
 from playwright.sync_api import sync_playwright
 import time
 import unicodedata
 import base64
+import io
 import re
-import os
-import tempfile
+import PyPDF2
 import requests
 import fitz
 import pytesseract
+import tempfile
 from PIL import Image
 from datetime import datetime
-from colorama import init, Fore, Style
+
+# Imports diretos da arquitetura raiz
 from config import TECON_CPF, TECON_SENHA, HEADLESS, CNPJ_TRANSPORTADORA
 from buscador_pdfs import encontrar_pasta_container, classificar_e_extrair_pdfs
-from extrator_pdf import extrair_texto_pdf
 
-# Caminho absoluto do Tesseract no Windows
 pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\tesseract\tesseract.exe"
-
-init(autoreset=True)
 
 def remover_acentos(texto):
     if not texto: return ""
@@ -46,41 +46,6 @@ def fechar_popups_tecon(page):
                 time.sleep(0.5)
         page.keyboard.press("Escape")
     except: pass 
-
-def limpar_conteineres_extras(page, container_alvo):
-    print(Fore.YELLOW + f"   ⏳ CT-e Multi-contêiner: Removendo carga extra (Mantendo apenas {container_alvo})...")
-    try:
-        page.evaluate(f"""
-            const alvo = '{container_alvo}'.replace(/\\s/g, '').toUpperCase();
-            const botoes = document.querySelectorAll("a[data-ng-click*='removeContainer']");
-            
-            botoes.forEach(btn => {{
-                let parent = btn.parentElement;
-                let meuInput = null;
-                while (parent && parent.tagName !== 'BODY') {{
-                    let inputs = parent.querySelectorAll("input[name='containerNbr']");
-                    if (inputs.length === 1) {{
-                        meuInput = inputs[0]; 
-                        break;
-                    }} else if (inputs.length > 1) {{
-                        break; 
-                    }}
-                    parent = parent.parentElement;
-                }}
-                if (meuInput) {{
-                    let valor = meuInput.value.replace(/\\s/g, '').toUpperCase();
-                    if (!valor.includes(alvo)) {{
-                        btn.click(); 
-                    }}
-                }} else {{
-                    btn.click();
-                }}
-            }});
-        """)
-        time.sleep(3) 
-        print(Fore.GREEN + f"   ✅ Limpeza concluída. Lista pronta!")
-    except Exception as e:
-        print(Fore.RED + f"   ⚠️ Falha ao tentar limpar a lista: {e}")
 
 # =========================================================
 # FASE 1: CONSULTAR SE CHEGOU NO PORTO
@@ -217,8 +182,6 @@ def solicitar_passes_tecon(lista_containers):
                             page.locator("button.swal2-confirm:has-text('OK'):visible").click(timeout=3000)
                             time.sleep(1)
                         except: pass
-
-                        limpar_conteineres_extras(page, numero)
                         
                         texto_tela_upper = page.locator("body").inner_text().upper()
                         todos_conteineres = set(re.findall(r'\b[A-Z]{4}\d{7}\b', texto_tela_upper))
@@ -298,16 +261,51 @@ def solicitar_passes_tecon(lista_containers):
             return resultados
 
 # =========================================================
-# FASE 3: LEITURA DE PDF INVISÍVEL COM FALLBACK DE PRINT
+# FASE 3: LEITURA DE DOWNLOADS INVISÍVEIS (A SOLUÇÃO DEFINITIVA)
 # =========================================================
+def _extrair_expiracao_gemini(screenshot_bytes: bytes) -> str | None:
+    """Usa Gemini Vision para extrair a data de expiração do passe de porta."""
+    try:
+        from google import genai
+        from google.genai import types
+        from config import LISTA_CHAVES_GEMINI
+
+        prompt = """Analise este documento (passe de porta do Tecon Suape) e retorne APENAS a data de expiração/validade no formato DD/MM/YYYY.
+Procure por campos como: EXPIRAÇÃO, VALIDADE, VÁLIDO ATÉ, VENCIMENTO.
+Retorne APENAS a data no formato DD/MM/YYYY, sem mais nada. Se não encontrar, retorne vazio."""
+
+        for chave in LISTA_CHAVES_GEMINI:
+            try:
+                client  = genai.Client(api_key=chave)
+                models  = client.models.list()
+                modelo  = next(
+                    (m.name.split("/")[-1] for m in models if "flash" in m.name.lower() and "vision" not in m.name.lower()),
+                    "gemini-1.5-flash"
+                )
+                resposta = client.models.generate_content(
+                    model=modelo,
+                    contents=[prompt, types.Part.from_bytes(data=screenshot_bytes, mime_type="image/jpeg")]
+                )
+                txt = resposta.text.strip()
+                # Valida formato DD/MM/YYYY
+                match = re.search(r'(\d{2}[/\-]\d{2}[/\-]\d{4})', txt)
+                if match:
+                    return match.group(1).replace('-', '/')
+            except Exception as e:
+                if "429" in str(e):
+                    time.sleep(3)
+    except Exception:
+        pass
+    return None
+
+
 def verificar_passes_aprovados(lista_containers):
     resultados_fase3 = {}
     if not lista_containers: return resultados_fase3
     
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=HEADLESS)
-        context = browser.new_context(viewport={'width': 1920, 'height': 1080})
-        page = context.new_page()
+        page = browser.new_page()
         
         try:
             if login_tecon(page):
@@ -325,6 +323,8 @@ def verificar_passes_aprovados(lista_containers):
                         time.sleep(1)
                         
                         page.locator("button[data-ng-click='getPartialFilter(filter)']").click()
+                        
+                        print(f"   ⏳ Aguardando atualização do Tecon...")
                         time.sleep(5)
                         
                         primeira_linha = page.locator("table tbody tr").first
@@ -334,150 +334,128 @@ def verificar_passes_aprovados(lista_containers):
                             continue
                             
                         texto_linha = primeira_linha.inner_text().upper()
+                        
                         linha_display = texto_linha.replace('\n', ' | ').strip()
                         print(f"   👀 Status lido na tela: {linha_display}")
-                        
-                        if "FINALIZADO" in texto_linha:
+
+                        # ── NO SHOW ────────────────────────────────────────
+                        if "NOSHOW" in texto_linha.replace(" ", "").replace("-", ""):
+                            print("   🚫 Status NO SHOW.")
+                            resultados_fase3[numero] = "NO SHOW"
+
+                        elif "FINALIZADO" in texto_linha:
                             print("   ✅ Status FINALIZADO! Entrando no atendimento...")
                             
                             with page.expect_popup() as aba_atend_info:
                                 primeira_linha.locator("a[data-ui-sref*='visualizar']").click()
                             aba_atend = aba_atend_info.value
                             aba_atend.wait_for_load_state("load")
-                            time.sleep(4) 
-                            
+                            time.sleep(4)
+
+                            # ── Encontra o botão de download do Passe de Porta ──
+                            # Identifica pelo label "Passe de porta" próximo ao botão de download
+                            idx_passe = aba_atend.evaluate("""() => {
+                                const rows = document.querySelectorAll('.row, div[class*="document"], div[class*="form-group"]');
+                                let idx = -1;
+                                let btnCount = 0;
+                                // Percorre todos os botões de download em ordem
+                                const btns = [];
+                                document.querySelectorAll('button').forEach(b => {
+                                    const html = b.innerHTML.toLowerCase();
+                                    const ngClick = (b.getAttribute('ng-click') || '').toLowerCase();
+                                    if (html.includes('fa-download') || html.includes('zmdi-download') || ngClick.includes('downloadfile') || b.querySelector('i.fa')) {
+                                        btns.push(b);
+                                    }
+                                });
+                                // Tenta achar o botão próximo a "Passe de porta"
+                                const spans = document.querySelectorAll('span.chosen-single span, option[value="PASSE_PORTA"], span');
+                                for (const span of spans) {
+                                    const txt = (span.innerText || span.textContent || '').trim().toLowerCase();
+                                    if (txt.includes('passe de porta') || txt.includes('passe porta')) {
+                                        // Procura o botão de download mais próximo
+                                        let el = span.parentElement;
+                                        for (let i = 0; i < 8; i++) {
+                                            const btn = el.querySelector('button');
+                                            if (btn) {
+                                                // Qual índice é esse botão?
+                                                for (let j = 0; j < btns.length; j++) {
+                                                    if (btns[j] === btn) { return j; }
+                                                }
+                                            }
+                                            el = el.parentElement;
+                                            if (!el) break;
+                                        }
+                                    }
+                                }
+                                // Fallback: retorna -1 (vai tentar todos)
+                                return -1;
+                            }""")
+
+                            # Marca todos os botões de download com id
                             qtd_botoes = aba_atend.evaluate("""() => {
                                 let btns = [];
                                 document.querySelectorAll('button').forEach(b => {
-                                    let html = b.innerHTML.toLowerCase();
-                                    let ngClick = (b.getAttribute('ng-click') || '').toLowerCase();
-                                    if (html.includes('fa-file-pdf') || html.includes('zmdi-download') || ngClick.includes('downloadfile')) {
+                                    const html = b.innerHTML.toLowerCase();
+                                    const ngClick = (b.getAttribute('ng-click') || '').toLowerCase();
+                                    if (html.includes('fa-download') || html.includes('zmdi-download') || ngClick.includes('downloadfile') || (b.querySelector && b.querySelector('i.fa'))) {
                                         btns.push(b);
                                     }
                                 });
                                 btns.forEach((b, i) => b.setAttribute('id', `botao-baixar-pdf-${i}`));
                                 return btns.length;
                             }""")
-                            
-                            data_vencimento = None
-                            
-                            if qtd_botoes == 0:
-                                print("   ⚠️ Nenhum botão de PDF encontrado na tela.")
-                            else:
-                                for i in range(qtd_botoes):
-                                    print(f"   📄 Intercetando PDF do documento {i+1}...")
-                                    try:
-                                        download_obj = []
-                                        page_obj = []
-                                        
-                                        aba_atend.once("download", lambda d: download_obj.append(d))
-                                        aba_atend.context.once("page", lambda p: page_obj.append(p))
-                                        
-                                        aba_atend.locator(f"#botao-baixar-pdf-{i}").click()
-                                        
-                                        for _ in range(15):
-                                            if download_obj or page_obj: break
-                                            time.sleep(1)
-                                            
-                                        caminho_temp = os.path.join(tempfile.gettempdir(), f"tecon_{int(time.time())}.pdf")
-                                        texto_extraido = ""
-                                        
-                                        if download_obj:
-                                            download_obj[0].save_as(caminho_temp)
-                                            texto_extraido = extrair_texto_pdf(caminho_temp)
-                                            
-                                        elif page_obj:
-                                            nova_aba = page_obj[0]
-                                            time.sleep(3) # Tempo extra para o PDF renderizar visualmente
-                                            url = nova_aba.url
-                                            
-                                            # Tentativa 1: Extração digital do blob ou link
-                                            if url.startswith("blob:"):
-                                                pdf_b64 = aba_atend.evaluate(f"""async () => {{
-                                                    try {{
-                                                        const res = await fetch('{url}');
-                                                        const blob = await res.blob();
-                                                        return await new Promise(resolve => {{
-                                                            const reader = new FileReader();
-                                                            reader.onloadend = () => resolve(reader.result);
-                                                            reader.readAsDataURL(blob);
-                                                        }});
-                                                    }} catch(e) {{ return null; }}
-                                                }}""")
-                                                if pdf_b64:
-                                                    with open(caminho_temp, "wb") as f:
-                                                        f.write(base64.b64decode(pdf_b64.split(",")[1]))
-                                            else:
-                                                try:
-                                                    cookies = context.cookies()
-                                                    session = requests.Session()
-                                                    for c in cookies:
-                                                        session.cookies.set(c['name'], c['value'], domain=c['domain'], path=c['path'])
-                                                    res = session.get(url, timeout=10)
-                                                    if res.status_code == 200:
-                                                        with open(caminho_temp, "wb") as f:
-                                                            f.write(res.content)
-                                                except: pass
-                                                    
-                                            if os.path.exists(caminho_temp):
-                                                texto_extraido = extrair_texto_pdf(caminho_temp)
-                                                
-                                            # PLANO B ABSOLUTO: Se o documento veio em branco ou inacessível
-                                            if not texto_extraido.strip():
-                                                print(Fore.YELLOW + "   ⚠️ PDF inacessível/vazio. Recorrendo à Visão Computacional direto na Aba...")
-                                                caminho_print = os.path.join(tempfile.gettempdir(), f"tecon_print_{int(time.time())}.png")
-                                                nova_aba.screenshot(path=caminho_print, full_page=True)
-                                                
-                                                try:
-                                                    img = Image.open(caminho_print).convert('L')
-                                                    texto_extraido = pytesseract.image_to_string(img, lang="por", config="--psm 6")
-                                                except:
-                                                    texto_extraido = pytesseract.image_to_string(Image.open(caminho_print), config="--psm 6")
-                                                    
-                                                try: os.remove(caminho_print)
-                                                except: pass
-                                                
-                                            nova_aba.close()
-                                        
-                                        try: os.remove(caminho_temp)
-                                        except: pass
-                                        
-                                        texto_limpo = re.sub(r'\s+', ' ', texto_extraido).strip()
-                                        if texto_limpo:
-                                            display_text = texto_limpo[:300] + "..." if len(texto_limpo) > 300 else texto_limpo
-                                            print(Fore.CYAN + f"   📝 LIDO: {display_text}")
-                                            
-                                            padroes_data = [
-                                                r"EXPIRA[CÇ][AÃ]?O\s*[:\-]?\s*(\d{2}[/\-]\d{2}[/\-]\d{4})",
-                                                r"DATA\s*(?:DE\s+)?EXPIRA[CÇ][AÃ]?O\s*[:\-]?\s*(\d{2}[/\-]\d{2}[/\-]\d{4})",
-                                                r"EXPIRA\s*[:\-]?\s*(\d{2}[/\-]\d{2}[/\-]\d{4})"
-                                            ]
 
-                                            for padrao in padroes_data:
-                                                match = re.search(padrao, texto_limpo, re.IGNORECASE)
-                                                if match:
-                                                    data_vencimento = match.group(1).replace('-', '/')
-                                                    break 
-                                        else:
-                                            print(Fore.RED + "   ❌ LIDO: [FALHA - DOCUMENTO COMPLETAMENTE EM BRANCO]")
-                                        
-                                        if data_vencimento:
-                                            break 
-                                        
-                                    except Exception as e:
-                                        print(Fore.RED + f"   ⚠️ Erro ao analisar o documento {i+1}: {e}")
-                            
+                            print(f"   📎 {qtd_botoes} botão(ões) de download | Passe de porta idx={idx_passe}")
+
+                            if qtd_botoes == 0:
+                                print("   ⚠️ Nenhum botão de download encontrado.")
+                                resultados_fase3[numero] = "FINALIZADO (DATA NÃO LIDA)"
+                                aba_atend.close()
+                                continue
+
+                            # Define quais botões testar — prioriza o Passe de Porta
+                            if idx_passe >= 0:
+                                indices = [idx_passe] + [i for i in range(qtd_botoes) if i != idx_passe]
+                            else:
+                                indices = list(range(qtd_botoes))
+
+                            data_vencimento = None
+
+                            for i in indices:
+                                print(f"   📄 Baixando documento {i+1}/{qtd_botoes}...")
+                                try:
+                                    with aba_atend.context.expect_page(timeout=15000) as page_info:
+                                        aba_atend.locator(f"#botao-baixar-pdf-{i}").click()
+
+                                    nova_aba = page_info.value
+                                    nova_aba.wait_for_load_state("load", timeout=15000)
+                                    time.sleep(2)
+
+                                    # Usa Gemini Vision para extrair a data (mais preciso que OCR)
+                                    screenshot_bytes = nova_aba.screenshot(type="jpeg", quality=95)
+                                    nova_aba.close()
+
+                                    data_vencimento = _extrair_expiracao_gemini(screenshot_bytes)
+                                    if data_vencimento:
+                                        print(f"   ✅ Data encontrada: {data_vencimento}")
+                                        break
+
+                                except Exception as e:
+                                    print(f"   ❌ Erro doc {i}: {type(e).__name__}: {e}")
+
                             if data_vencimento:
                                 resultados_fase3[numero] = f"PASSE VENCE {data_vencimento}"
-                                print(Fore.GREEN + f"   🎯 BINGO! {resultados_fase3[numero]}")
+                                print(f"   🎯 {resultados_fase3[numero]}")
                             else:
-                                print(Fore.YELLOW + "   ⚠️ Nenhum documento retornou a palavra EXPIRAÇÃO.")
+                                print("   ⚠️ Data de expiração não encontrada.")
                                 resultados_fase3[numero] = "FINALIZADO (DATA NÃO LIDA)"
-                                
+
                             aba_atend.close()
-                            
+
                         elif "PENDÊNCIA CLIENTE" in texto_linha:
                             resultados_fase3[numero] = "PENDÊNCIA CLIENTE"
+                        elif "REJEITADO" in texto_linha:
+                            resultados_fase3[numero] = "REJEITADO"
                         else:
                             resultados_fase3[numero] = "EM ANÁLISE"
                             

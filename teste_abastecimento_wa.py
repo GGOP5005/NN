@@ -16,6 +16,7 @@ import json
 import time
 import re
 import tempfile
+import hashlib
 from pathlib import Path
 from datetime import datetime
 from colorama import init, Fore, Style
@@ -44,7 +45,7 @@ from api_bsoft import BsoftAPI
 
 # ── Argumentos ────────────────────────────────────────────────
 DRY_RUN     = "--lancar" not in sys.argv
-LIMITE      = 10  # máximo de cupons por execução
+LIMITE      = 3   # máximo de cupons por execução
 EMPRESAS_ID = os.environ.get("BSOFT_EMPRESA_ID", "2")
 
 args = sys.argv[1:]
@@ -65,46 +66,51 @@ for i, a in enumerate(args):
 
 def extrair_anexo(msg_node, page_ref) -> str | None:
     """
-    Mesma lógica do despachante_whatsapp.py:
-    hover → seta de contexto ou click direito → Baixar
+    Captura a imagem via blob JS — sem nenhum clique no menu.
+    Evita o problema de o WA fechar o grupo ao clicar em botões.
     """
     try:
         msg_node.scroll_into_view_if_needed()
-        msg_node.hover()
         time.sleep(0.5)
 
-        # Tenta seta de contexto primeiro (igual ao despachante)
-        btn_menu = msg_node.locator(
-            'span[data-icon="ic-chevron-down-menu"], span[data-icon="down-context"]'
-        ).first
-        if btn_menu.is_visible():
-            btn_menu.click(force=True)
-        else:
-            msg_node.click(button="right", force=True)
+        # Pega src de todas as imagens dentro da mensagem
+        srcs = msg_node.evaluate("""node => {
+            return Array.from(node.querySelectorAll('img'))
+                .map(img => img.src)
+                .filter(src => src && src.startsWith('blob:'));
+        }""")
 
-        time.sleep(1)
+        if not srcs:
+            return None
 
-        btn_baixar = page_ref.locator(
-            'ul li:has-text("Baixar"), ul li:has-text("Download"), '
-            'div[role="button"]:has-text("Baixar")'
-        ).first
+        img_src = srcs[0]
 
-        if btn_baixar.is_visible():
-            with page_ref.expect_download(timeout=15000) as dl_info:
-                btn_baixar.click(timeout=5000)
-            dl  = dl_info.value
-            ext = os.path.splitext(dl.suggested_filename)[1] or ".png"
-            ts  = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-            dest = os.path.join(PASTA_CUPONS, f"cupom_{int(time.time())}{ext}")
-            dl.save_as(dest)
-            return dest
-        else:
-            page_ref.keyboard.press("Escape")
-    except Exception:
-        try:
-            page_ref.keyboard.press("Escape")
-        except Exception:
-            pass
+        b64 = page_ref.evaluate(f"""async () => {{
+            try {{
+                const res  = await fetch('{img_src}');
+                const blob = await res.blob();
+                return await new Promise(resolve => {{
+                    const reader = new FileReader();
+                    reader.onloadend = () => resolve(reader.result);
+                    reader.readAsDataURL(blob);
+                }});
+            }} catch(e) {{ return null; }}
+        }}""")
+
+        if not b64 or ',' not in b64:
+            return None
+
+        import base64 as _b64
+        dados = _b64.b64decode(b64.split(',')[1])
+        ext   = '.jpg' if 'jpeg' in b64 else '.png'
+        dest  = os.path.join(PASTA_CUPONS, f"cupom_{int(time.time())}{ext}")
+        with open(dest, 'wb') as f_out:
+            f_out.write(dados)
+
+        return dest
+
+    except Exception as e:
+        log(f"   ⚠️ extrair_anexo: {e}", Fore.YELLOW)
     return None
 
 
@@ -148,20 +154,141 @@ def baixar_midias_grupo(page, nome_grupo: str, ids_processados: set) -> list:
 
     # Pega TODAS as mensagens recebidas com mídia (img ou document)
     # Igual ao despachante: div.message-in
+    from datetime import timedelta
+
+    hoje    = datetime.now()
+    limite  = hoje - timedelta(hours=36)
+
+    # Lê os separadores de data + mensagens em ordem para saber a data de cada msg
+    # O WA renderiza separadores como: "Hoje", "Ontem", "sexta-feira", "26/03/2026"
+    # Estratégia: varre o DOM inteiro em ordem e usa os separadores de data
+    # para saber qual data cada mensagem pertence
+    # Usa posição Y no viewport para correlacionar mensagens com separadores de data
+    dados_dom = page.evaluate("""() => {
+        // Separadores: span[dir=auto] com fontSize 12px
+        const separadores = [];
+        document.querySelectorAll('span[dir="auto"]').forEach(span => {
+            const style = span.getAttribute('style') || '';
+            if (!style.includes('--x-fontSize: 12px')) return;
+            const txt = (span.innerText || '').trim();
+            if (!txt || txt.length > 20) return;
+            const eh_data = txt.includes('/') ||
+                /^(hoje|ontem|seg|ter|qua|qui|sex|s[aá]b|dom)/i.test(txt);
+            if (!eh_data) return;
+            const rect = span.getBoundingClientRect();
+            separadores.push({ texto: txt, y: rect.top + window.scrollY });
+        });
+
+        // Mensagens recebidas com mídia — guarda índice para usar nth()
+        const mensagens = [];
+        let idx = 0;
+        document.querySelectorAll('div.message-in').forEach(msg => {
+            const temMidia = !!msg.querySelector('img') ||
+                             !!msg.querySelector('span[data-icon="document"]');
+            const midiaNth = idx; idx++;
+            if (!temMidia) return;
+            const dataId = msg.getAttribute('data-id') || ('noid_' + midiaNth);
+            const rect = msg.getBoundingClientRect();
+            mensagens.push({ dataId, y: rect.top + window.scrollY, nth: midiaNth });
+        });
+
+        return { separadores: separadores.sort((a,b)=>a.y-b.y),
+                 mensagens:   mensagens.sort((a,b)=>a.y-b.y) };
+    }""")
+
+    separadores = dados_dom.get('separadores', [])
+    mensagens   = dados_dom.get('mensagens', [])
+
+    seps = [s['texto'] for s in separadores]
+    log(f"   📅 Separadores detectados: {seps}", Fore.CYAN)
+    log(f"   📨 {len(mensagens)} msg(s) com mídia encontradas no DOM", Fore.CYAN)
+
+    DIAS_PT = {'hoje': hoje.date(), 'ontem': (hoje - timedelta(days=1)).date()}
+    for i in range(2, 8):
+        d = hoje - timedelta(days=i)
+        mapa = {'Monday':'segunda','Tuesday':'terça','Wednesday':'quarta',
+                'Thursday':'quinta','Friday':'sexta','Saturday':'sábado','Sunday':'domingo'}
+        nome_pt = mapa.get(d.strftime('%A'), '').lower()
+        if nome_pt:
+            DIAS_PT[nome_pt] = d.date()
+            DIAS_PT[nome_pt[:3]] = d.date()
+
+    def txt_para_data(txt):
+        txt_low = txt.lower().strip()
+        if '/' in txt:
+            try:
+                p = txt.split('/')
+                return datetime(int(p[2]), int(p[1]), int(p[0])).date()
+            except Exception:
+                return None
+        for chave, val in DIAS_PT.items():
+            if txt_low.startswith(chave):
+                return val
+        return None
+
     todas_msgs = page.locator('div.message-in').all()
     log(f"📱 {len(todas_msgs)} mensagem(ns) recebida(s) no grupo.", Fore.CYAN)
 
     msgs_com_midia = []
-    for msg in todas_msgs:
-        try:
-            tem_midia = msg.locator('img, span[data-icon="document"]').count() > 0
-            if tem_midia:
-                data_id = msg.get_attribute("data-id") or msg.inner_text().strip()[:40]
-                msgs_com_midia.append({"node": msg, "data_id": data_id})
-        except Exception:
-            pass
+    for msg_info in mensagens:
+        data_id = msg_info['dataId']
+        msg_y   = msg_info['y']
 
-    log(f"🖼️  {len(msgs_com_midia)} mensagem(ns) com mídia.", Fore.CYAN)
+        if data_id in ids_processados:
+            log(f"   ⏭️ Já processado: {data_id[:40]}", Fore.WHITE)
+            continue
+
+        # Separador imediatamente antes desta mensagem (maior Y <= msg_y)
+        sep_antes = None
+        for sep in separadores:
+            if sep['y'] <= msg_y:
+                sep_antes = sep
+        
+        data_msg = txt_para_data(sep_antes['texto']) if sep_antes else None
+
+        if data_msg:
+            data_dt    = datetime.combine(data_msg, datetime.min.time())
+            diff_horas = (hoje - data_dt).total_seconds() / 3600
+            if diff_horas > 48:
+                log(f"   🗓️ Mensagem de {data_msg} ignorada ({diff_horas:.0f}h)", Fore.WHITE)
+                continue
+
+        # Usa índice nth para achar o node correto (evita problema com @ no CSS)
+        nth = msg_info.get("nth", -1)
+        if nth >= 0:
+            node_encontrado = page.locator('div.message-in').nth(nth)
+        else:
+            node_encontrado = None
+            todos = page.locator('div.message-in').all()
+            for n in todos:
+                try:
+                    if (n.get_attribute("data-id") or "") == data_id:
+                        node_encontrado = n
+                        break
+                except Exception:
+                    pass
+
+        if not node_encontrado:
+            log(f"   ⚠️ Node não encontrado: {data_id[:40]}", Fore.YELLOW)
+            continue
+
+        log(f"   ✅ Aceita: data={data_msg} | id={data_id[:40]}", Fore.CYAN)
+        msgs_com_midia.append({"node": node_encontrado, "data_id": data_id, "ts": str(data_msg or "")})
+
+    # Fallback: sem separadores detectados
+    if not separadores:
+        log("   ⚠️ Sem separadores — fallback sem filtro.", Fore.YELLOW)
+        for msg in todas_msgs:
+            try:
+                tem_midia = msg.locator('img, span[data-icon="document"]').count() > 0
+                if not tem_midia: continue
+                data_id = msg.get_attribute("data-id") or f"noid_{len(msgs_com_midia)}"
+                if data_id in ids_processados: continue
+                msgs_com_midia.append({"node": msg, "data_id": data_id, "ts": ""})
+            except Exception:
+                pass
+
+    log(f"🖼️  {len(msgs_com_midia)} mensagem(ns) com mídia para processar.", Fore.CYAN)
 
     count = 0
     # Processa as mais recentes primeiro (últimas da lista)
@@ -176,23 +303,42 @@ def baixar_midias_grupo(page, nome_grupo: str, ids_processados: set) -> list:
             log(f"   ⏭️ Já processado.", Fore.WHITE)
             continue
 
-        log(f"   📥 Baixando cupom {count + 1}...", Fore.CYAN)
+        log(f"   📥 Baixando cupom {count + 1} ({item.get('ts', '?')})...", Fore.CYAN)
 
         arquivo = extrair_anexo(msg_node, page)
         time.sleep(1)
 
         if arquivo:
-            log(f"   ✅ Salvo: {os.path.basename(arquivo)}", Fore.GREEN)
+            tamanho = os.path.getsize(arquivo)
+            hash_arq = hashlib.md5(open(arquivo, "rb").read()).hexdigest()
+            log(f"   🔍 data_id={data_id[:40]} | tamanho={tamanho}B | hash={hash_arq[:8]}", Fore.MAGENTA)
+            log(f"       ids_proc contém data_id: {data_id in ids_processados} | hash: {hash_arq in ids_processados}", Fore.MAGENTA)
+
+            if tamanho < 5000:
+                log(f"   ⏭️ Arquivo muito pequeno ({tamanho}B) — descartado.", Fore.YELLOW)
+                os.remove(arquivo)
+                ids_processados.add(data_id)
+                continue
+
+            if hash_arq in ids_processados:
+                log(f"   ⏭️ Hash já processado — descartado.", Fore.WHITE)
+                os.remove(arquivo)
+                ids_processados.add(data_id)
+                salvar_ids_processados(ids_processados)
+                continue
+
+            log(f"   ✅ Salvo: {os.path.basename(arquivo)} ({tamanho//1024}KB)", Fore.GREEN)
             cupons.append({
                 "id_msg":    data_id,
                 "grupo":     nome_grupo,
                 "arquivo":   arquivo,
                 "remetente": "",
-                "timestamp": "",
+                "timestamp": item.get("ts", ""),
             })
             count += 1
         else:
-            log(f"   ❌ Não foi possível baixar.", Fore.RED)
+            log(f"   ❌ Não foi possível baixar — pulando.", Fore.RED)
+            ids_processados.add(data_id)  # marca para não travar de novo
 
         time.sleep(1)
 
@@ -234,10 +380,34 @@ def processar_cupom(api, cupom, ids_processados):
     print(Fore.CYAN + f"   CNPJ posto: {dados.get('posto_cnpj')} | KM: {dados.get('km_atual')}")
 
     if not dados.get("placa") or not dados.get("litros") or not dados.get("valor_total"):
-        entrada_log["erro"] = "Dados incompletos"
+        entrada_log["erro"] = "Dados incompletos — provavelmente foto de hodômetro"
         salvar_log(entrada_log)
-        log("❌ Dados incompletos no cupom.", Fore.RED)
+        log("❌ Dados incompletos — marcando como processado para não repetir.", Fore.YELLOW)
+        # Salva hash para não baixar de novo
+        hash_arq = hashlib.md5(open(arquivo, "rb").read()).hexdigest()
+        ids_processados.add(hash_arq)
+        ids_processados.add(cupom["id_msg"])
+        salvar_ids_processados(ids_processados)
         return False
+
+    # Valida data — ignora cupons com mais de 36h
+    if dados.get("data"):
+        try:
+            from datetime import timedelta
+            data_cupom = datetime.strptime(dados["data"], "%Y-%m-%d")
+            if (datetime.now() - data_cupom).total_seconds() > 36 * 3600:
+                log(f"   ⏭️ Cupom antigo ({dados['data']}) — ignorando.", Fore.YELLOW)
+                # Persiste hash+id imediatamente para não baixar de novo
+                hash_arquivo = hashlib.md5(open(arquivo, "rb").read()).hexdigest()
+                ids_processados.add(hash_arquivo)
+                ids_processados.add(cupom["id_msg"])
+                salvar_ids_processados(ids_processados)
+                log(f"   💾 Hash {hash_arquivo[:8]} salvo — não vai baixar de novo.", Fore.CYAN)
+                entrada_log["erro"] = f"Cupom antigo: {dados['data']}"
+                salvar_log(entrada_log)
+                return False
+        except Exception:
+            pass
 
     # Equipamento
     equip_id = buscar_equipamento_por_placa(api, dados["placa"])
@@ -247,10 +417,13 @@ def processar_cupom(api, cupom, ids_processados):
         return False
     entrada_log["equipamento_id"] = equip_id
 
-    # Fornecedor
-    forn_id = buscar_fornecedor_por_cnpj(api, dados.get("posto_cnpj", ""))
+    # Fornecedor — tenta CNPJ exato, fuzzy por nome+CNPJ, depois só nome
+    from robo_abastecimento import buscar_fornecedor_por_nome
+    forn_id = buscar_fornecedor_por_cnpj(api, dados.get("posto_cnpj", ""), dados.get("posto_nome", ""))
+    if not forn_id and dados.get("posto_nome"):
+        forn_id = buscar_fornecedor_por_nome(api, dados["posto_nome"], dados.get("posto_cnpj",""))
     if not forn_id:
-        entrada_log["erro"] = f"CNPJ {dados.get('posto_cnpj')} não encontrado"
+        entrada_log["erro"] = f"Fornecedor não encontrado: CNPJ={dados.get('posto_cnpj')} Nome={dados.get('posto_nome')}"
         salvar_log(entrada_log)
         return False
     entrada_log["fornecedor_id"] = forn_id
@@ -263,8 +436,17 @@ def processar_cupom(api, cupom, ids_processados):
         return False
     entrada_log["combustivel_id"] = comb_id
 
-    # Motorista (opcional)
-    motor_id = buscar_motorista_planilha(dados.get("placa", ""), dados.get("data", ""))
+    # Motorista — CPF do cupom → planilha → nome → ID Bsoft
+    from robo_abastecimento import buscar_motorista_id_por_nome, buscar_motorista_id_por_cpf
+    motor_id = None
+    if dados.get("motorista_cpf"):
+        motor_id = buscar_motorista_id_por_cpf(api, dados["motorista_cpf"])
+    if not motor_id:
+        nome_motorista = buscar_motorista_planilha(dados.get("placa", ""), dados.get("data", ""))
+        if nome_motorista:
+            motor_id = buscar_motorista_id_por_nome(api, nome_motorista)
+    if not motor_id and dados.get("motorista"):
+        motor_id = buscar_motorista_id_por_nome(api, dados["motorista"])
     entrada_log["motorista_id"] = motor_id
 
     # Resumo
@@ -283,7 +465,7 @@ def processar_cupom(api, cupom, ids_processados):
     resultado = lancar_abastecimento(api, dados, equip_id, forn_id, comb_id, motor_id, EMPRESAS_ID)
     entrada_log["resultado_bsoft"] = resultado
 
-    if resultado and (resultado.get("id") or resultado.get("success")):
+    if resultado and (resultado.get("id") or resultado.get("success") or resultado.get("codAbastecimento")):
         entrada_log["status"] = "OK"
         salvar_log(entrada_log)
         ids_processados.add(id_msg)

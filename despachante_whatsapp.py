@@ -503,6 +503,35 @@ def buscar_entregas_liberadas(service, aba):
         print(Fore.RED + f"   ❌ Erro ao buscar entregas: {e}")
         return []
 
+def _verificar_pagina_viva(page) -> bool:
+    """Verifica se a página do WhatsApp está respondendo ou crashou."""
+    try:
+        url = page.url
+        if not url or "about:blank" in url or "chrome-error" in url:
+            return False
+        page.evaluate("() => document.title", timeout=5000)
+        return True
+    except Exception:
+        return False
+
+
+def _reiniciar_wa(page, timeout=120) -> bool:
+    """Recarrega o WhatsApp Web e aguarda conectar."""
+    print(Fore.YELLOW + "♻️  Recarregando WhatsApp Web...")
+    try:
+        page.goto("https://web.whatsapp.com/", timeout=timeout * 1000)
+        page.wait_for_selector(
+            'input[data-tab="3"], div[contenteditable="true"][data-tab="3"]',
+            timeout=timeout * 1000
+        )
+        print(Fore.GREEN + "✅ WhatsApp reconectado!")
+        time.sleep(3)
+        return True
+    except Exception as e:
+        print(Fore.RED + f"❌ Falha ao reconectar: {e}")
+        return False
+
+
 def despachante_continuo():
     limpar_tela()
     print(Fore.BLUE + Style.BRIGHT + "======================================================================")
@@ -845,6 +874,17 @@ def despachante_continuo():
                             
                 print(Fore.CYAN + f"⏳ Retornando ao modo escuta (5s)...")
                 time.sleep(5)
+
+                # ── Watchdog: detecta crash/Out of Memory ──────────────
+                if not _verificar_pagina_viva(page):
+                    print(Fore.YELLOW + "⚠️  Página crashou (Out of Memory ou similar). Tentando recuperar...")
+                    for tentativa in range(1, 4):
+                        print(Fore.YELLOW + f"   🔄 Tentativa {tentativa}/3...")
+                        if _reiniciar_wa(page):
+                            break
+                        time.sleep(10)
+                    else:
+                        raise Exception("Página não recuperou após 3 tentativas — reiniciando processo.")
                 
         except Exception as e:
             print(Fore.RED + f"\n❌ Erro Crítico no WhatsApp: {e}")
