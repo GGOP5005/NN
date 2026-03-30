@@ -38,8 +38,6 @@ from api_bsoft import BsoftAPI
 
 init(autoreset=True)
 
-EMPRESAS_ID_DEFAULT = os.environ.get("BSOFT_EMPRESA_ID", "2")
-
 # =============================================================
 # CONFIGURAÇÕES
 # =============================================================
@@ -212,16 +210,17 @@ def _listar_modelo_disponivel(client, chave: str) -> str:
 
 def _ocr_imagem(caminho: str) -> str:
     try:
-        from PIL import Image
+        from PIL import Image, ImageEnhance
         import pytesseract
-        # Verifica se tesseract está instalado
-        pytesseract.get_tesseract_version()
-        img = Image.open(caminho)
+        pytesseract.pytesseract.tesseract_cmd = r"C:\Users\supor\Dropbox\DIVERSOS\IA\tesseract\tesseract.exe"
+        img = Image.open(caminho).convert("L")  # Escala de cinza
+        # Dobra o contraste — ajuda a distinguir "6" de "0" em papel térmico
+        img = ImageEnhance.Contrast(img).enhance(2.0)
         w, h = img.size
         img = img.resize((w * 2, h * 2), Image.LANCZOS)
         return pytesseract.image_to_string(img, lang="por").strip()
     except Exception:
-        return ""  # Tesseract não instalado ou falhou — vai direto pro Gemini Vision
+        return ""
 
 
 def _texto_parece_cupom(texto: str) -> bool:
@@ -230,12 +229,27 @@ def _texto_parece_cupom(texto: str) -> bool:
     return hits >= 2
 
 
-_PROMPT_TEXTO = """Extraia dados deste cupom fiscal (texto OCR). Retorne APENAS JSON sem markdown:
-{"posto_nome":"","posto_cnpj":"","posto_cidade":"","posto_uf":"","data":"YYYY-MM-DD",
+_ANO_ATUAL = datetime.now().year
+_PROMPT_TEXTO = f"""Extraia dados deste cupom fiscal (texto OCR). Retorne APENAS JSON sem markdown.
+ATENÇÃO: Estamos em {_ANO_ATUAL}. O OCR frequentemente confunde o dígito "6" com "0" ou "8" em papel térmico.
+Se a data parecer "2020", "2028" ou ano inválido, CORRIJA automaticamente para {_ANO_ATUAL}.
+
+{{"posto_nome":"","posto_cnpj":"","posto_cidade":"","posto_uf":"","data":"YYYY-MM-DD",
 "combustivel":"","litros":"","valor_unitario":"","valor_total":"","placa":"",
-"motorista":"","motorista_cpf":"","km_atual":"","numero_cupom":"","chave_acesso":""}
+"motorista":"","motorista_cpf":"","km_atual":"","numero_cupom":"","chave_acesso":""}}
 TEXTO:
 """
+
+
+def corrigir_ano(dados: dict) -> dict:
+    """Força correção do ano se OCR/IA ainda errou."""
+    data_str = dados.get("data", "")
+    if data_str and len(data_str) >= 4:
+        ano_str = data_str[:4]
+        if ano_str in {"2020","2021","2022","2023","2025","2028","2029"}:
+            dados["data"] = str(datetime.now().year) + data_str[4:]
+            log(f"   🔧 Ano corrigido: {ano_str} → {datetime.now().year}", Fore.YELLOW)
+    return dados
 
 
 def _extrair_via_texto(texto_ocr: str) -> dict | None:
@@ -258,17 +272,20 @@ def _extrair_via_texto(texto_ocr: str) -> dict | None:
 
 
 def extrair_dados_cupom_gemini(caminho_arquivo: str) -> dict | None:
-    """Tenta OCR+texto primeiro, usa visao so como fallback."""
+    """Tenta OCR+texto primeiro, usa visao so como fallback. Corrige ano em ambos."""
     texto = _ocr_imagem(caminho_arquivo)
     if texto and _texto_parece_cupom(texto):
-        log(f"   📝 OCR ok, modo texto", Fore.WHITE)
+        log(f"   📝 OCR ok ({len(texto)} chars), modo texto", Fore.WHITE)
         res = _extrair_via_texto(texto)
         if res and res.get("placa") and res.get("litros"):
-            return res
+            return corrigir_ano(res)
         log(f"   ⚠️ Texto insuficiente, usando visao", Fore.YELLOW)
     else:
         log(f"   👁️ OCR fraco, usando Gemini Vision", Fore.WHITE)
-    return _extrair_via_visao(caminho_arquivo)
+    res = _extrair_via_visao(caminho_arquivo)
+    if res:
+        res = corrigir_ano(res)
+    return res
 
 
 def _extrair_via_visao(caminho_arquivo: str) -> dict | None:
@@ -855,8 +872,15 @@ def coletar_cupons_grupo(page, nome_grupo: str, ids_processados: set) -> list:
             grupo_loc.click(force=True)
             time.sleep(3)
 
-        # WhatsApp já abre na última mensagem — apenas aguarda carregar
+        # Clica no botão ↓ (scroll to bottom) se existir — garante mensagens mais recentes
         time.sleep(1.5)
+        try:
+            btn_down = page.locator('span[data-icon="down"]').last
+            if btn_down.count() > 0 and btn_down.is_visible():
+                btn_down.click()
+                time.sleep(1)
+        except Exception:
+            pass
 
         # Pega todas as mensagens recebidas com imagem — igual ao despachante
         todas = page.locator('div.message-in').all()
@@ -1040,8 +1064,17 @@ def executar_ciclo():
             log(f"   📄 Dados: placa={dados.get('placa')} | litros={dados.get('litros')} | total={dados.get('valor_total')}", Fore.CYAN)
             entrada_log["dados_gemini"] = dados
 
-            # 2b. Filtra pela data do cupom (≤ 80h)
+            # 2b. Corrige ano OCR errado (2020, 2025, 2028, 2029 → ano atual)
             data_cupom_str = dados.get("data", "")
+            if data_cupom_str and len(data_cupom_str) >= 4:
+                ano_str = data_cupom_str[:4]
+                ano_atual = str(datetime.now().year)
+                if ano_str in ("2020", "2025", "2028", "2029", "2021", "2022", "2023"):
+                    dados["data"] = ano_atual + data_cupom_str[4:]
+                    log(f"   🔧 Ano corrigido: {ano_str} → {ano_atual}", Fore.YELLOW)
+                    data_cupom_str = dados["data"]
+
+            # 2c. Filtra pela data do cupom (≤ 80h)
             if data_cupom_str:
                 try:
                     data_cupom = datetime.strptime(data_cupom_str, "%Y-%m-%d")

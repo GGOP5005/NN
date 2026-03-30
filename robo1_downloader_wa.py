@@ -64,9 +64,6 @@ def salvar_ids_processados(ids: set):
 def baixar_blob(page, msg_node, destino: str) -> str | None:
     """Baixa imagem via JS sem nenhum clique ou scroll."""
     try:
-        msg_node.scroll_into_view_if_needed()
-        time.sleep(0.8)
-
         srcs = msg_node.evaluate("""node => {
             return Array.from(node.querySelectorAll('img'))
                 .map(img => img.src)
@@ -106,9 +103,8 @@ def baixar_blob(page, msg_node, destino: str) -> str | None:
 
 def coletar_grupo(page, codigo: str, nome_grupo: str, ids_processados: set) -> list:
     """
-    Entra no grupo e captura mensagens com imagem que já estão
-    VISÍVEIS NA VIEWPORT — sem scroll algum.
-    Retorna lista de dicts com metadados para o robô 2 processar.
+    Entra no grupo e captura as 5 últimas mensagens com imagem
+    que estão VISÍVEIS NA VIEWPORT — sem scroll algum.
     """
     salvos = []
     os.makedirs(PASTA_CUPONS, exist_ok=True)
@@ -136,10 +132,10 @@ def coletar_grupo(page, codigo: str, nome_grupo: str, ids_processados: set) -> l
         log(f"   ⚠️ Nenhuma mensagem carregada em '{nome_grupo}'.", Fore.YELLOW)
         return salvos
 
-    time.sleep(1.0)
+    time.sleep(1.5)
 
-    # Pega APENAS mensagens visíveis na viewport atual (sem scroll)
-    # getBoundingClientRect().top >= 0 && bottom <= window.innerHeight
+    # Pega mensagens com imagem VISÍVEIS NA VIEWPORT
+    # Não rola — pega o que está na tela após o WA abrir (últimas mensagens)
     msgs_visiveis = page.evaluate("""() => {
         const resultado = [];
         const msgs = document.querySelectorAll('div.message-in');
@@ -148,8 +144,8 @@ def coletar_grupo(page, codigo: str, nome_grupo: str, ids_processados: set) -> l
             const temImagem = !!msg.querySelector('img');
             if (!temImagem) return;
             const rect = msg.getBoundingClientRect();
-            // Aceita mensagens visíveis OU próximas do fundo (últimas carregadas)
-            const visivel = rect.top < alturaJanela + 300 && rect.bottom > -300;
+            // Aceita mensagens na viewport ou logo abaixo (carregadas mas fora)
+            const visivel = rect.top < alturaJanela + 500 && rect.bottom > -100;
             if (!visivel) return;
             resultado.push({
                 dataId: msg.getAttribute('data-id') || ('noid_' + idx),
@@ -157,14 +153,14 @@ def coletar_grupo(page, codigo: str, nome_grupo: str, ids_processados: set) -> l
                 top: rect.top,
             });
         });
-        // Ordena por posição — as mais recentes ficam mais abaixo (top maior)
+        // Mais recentes = maior top (mais abaixo)
         resultado.sort((a, b) => b.top - a.top);
         return resultado;
     }""")
 
     log(f"   📱 '{nome_grupo}': {len(msgs_visiveis)} imagem(ns) visível(is)", Fore.CYAN)
 
-    # Pega as 5 mais recentes (top maior = mais abaixo na tela)
+    # Pega as 5 mais recentes
     for item in msgs_visiveis[:5]:
         data_id = item['dataId']
         nth     = item['nth']
@@ -174,8 +170,7 @@ def coletar_grupo(page, codigo: str, nome_grupo: str, ids_processados: set) -> l
             continue
 
         msg_node = page.locator('div.message-in').nth(nth)
-
-        ts  = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        ts   = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         dest = os.path.join(PASTA_CUPONS, f"cupom_{codigo}_{ts}.jpg")
 
         log(f"   📥 Baixando {data_id[:35]}...", Fore.CYAN)
@@ -193,7 +188,6 @@ def coletar_grupo(page, codigo: str, nome_grupo: str, ids_processados: set) -> l
             log(f"   ⏭️ Duplicata (hash).", Fore.WHITE)
             continue
 
-        # Salva metadado JSON junto com a imagem
         meta = {
             "id_msg":        data_id,
             "grupo":         nome_grupo,

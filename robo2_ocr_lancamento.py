@@ -2,11 +2,12 @@
 robo2_ocr_lancamento.py
 ========================
 Responsabilidade: processar imagens já baixadas pelo Robô 1.
-  1. Lê arquivos .jpg/.png da pasta cupons_abastecimento/
-  2. OCR com Tesseract (caminho Windows fixo)
-  3. Se OCR fraco → Gemini Vision
-  4. Lança na Bsoft
-  5. Limpa arquivos processados e inúteis (manutenção de espaço)
+  1. Aciona robo1 para baixar fotos novas
+  2. Lê arquivos .jpg/.png da pasta cupons_abastecimento/
+  3. OCR com Tesseract (caminho Windows fixo) + contraste 2x
+  4. Se OCR fraco → Gemini Vision
+  5. Lança na Bsoft
+  6. Limpa arquivos processados
 
 Agenda: 08:00 e 20:00
 """
@@ -36,8 +37,9 @@ PASTA_CUPONS     = os.path.join(BASE_DIR, "cupons_abastecimento")
 PASTA_LOGS       = os.path.join(BASE_DIR, "logs", "abastecimento")
 ARQUIVO_IDS_PROC = os.path.join(BASE_DIR, "logs", "abastecimento", "ids_processados.json")
 
-# Importa funções do robô original (busca Bsoft, lançamento, etc.)
+# Importa funções do robô original
 from robo_abastecimento import (
+    _listar_modelo_disponivel,
     buscar_equipamento_por_placa,
     buscar_fornecedor_por_cnpj,
     buscar_fornecedor_por_nome,
@@ -48,13 +50,11 @@ from robo_abastecimento import (
     lancar_abastecimento,
     salvar_log,
     formatar_moeda,
-    limpar_placa,
-    normalizar,
     _extrair_via_visao,
-    EMPRESAS_ID_DEFAULT,
 )
 
 EMPRESAS_ID = os.environ.get("BSOFT_EMPRESA_ID", "2")
+ANO_ATUAL   = datetime.now().year
 
 
 def log(msg, cor=Fore.WHITE):
@@ -81,17 +81,22 @@ def salvar_ids_processados(ids: set):
 # ── OCR ────────────────────────────────────────────────────────────────────
 
 def ocr_tesseract(caminho: str) -> str:
-    """OCR com Tesseract. Retorna texto ou string vazia se falhar."""
+    """
+    OCR com Tesseract.
+    - Upscale 2x para melhorar leitura de cupons térmicos
+    - Contraste 2x para escurecer o texto e ajudar a distinguir '6' de '0'
+    """
     try:
         import pytesseract
-        from PIL import Image
+        from PIL import Image, ImageEnhance
 
         pytesseract.pytesseract.tesseract_cmd = TESSERACT_CMD
 
-        img = Image.open(caminho)
+        img = Image.open(caminho).convert("L")  # Escala de cinza
         w, h = img.size
-        # Upscale 2x para melhorar OCR em fotos de cupom
         img = img.resize((w * 2, h * 2), Image.LANCZOS)
+        img = ImageEnhance.Contrast(img).enhance(2.0)  # Dobra o contraste
+
         texto = pytesseract.image_to_string(img, lang="por")
         return texto.strip()
     except Exception as e:
@@ -106,11 +111,15 @@ def texto_parece_cupom(texto: str) -> bool:
     return hits >= 2
 
 
-PROMPT_PARSE = """Extraia dados deste cupom fiscal (texto OCR). 
+PROMPT_PARSE = f"""Extraia dados deste cupom fiscal (texto OCR).
 Retorne APENAS JSON sem markdown, sem explicações.
 Se não for cupom de abastecimento, retorne todos campos vazios.
 
-{
+ATENÇÃO: Estamos no ano de {ANO_ATUAL}. O OCR frequentemente confunde o dígito '6' com '0' ou '8'
+em impressoras de papel térmico. Se a data do documento parecer ser "2020", "2021", "2022",
+"2023", "2025", "2028" ou "2029", CORRIJA o ano automaticamente para "{ANO_ATUAL}".
+
+{{
   "posto_nome": "",
   "posto_cnpj": "somente digitos",
   "posto_cidade": "",
@@ -127,24 +136,20 @@ Se não for cupom de abastecimento, retorne todos campos vazios.
   "km_atual": "inteiro",
   "numero_cupom": "",
   "chave_acesso": "44 digitos se houver"
-}
+}}
 
 TEXTO OCR:
 """
 
 
 def parse_texto_com_gemini(texto_ocr: str) -> dict | None:
-    """Usa Gemini (modo texto) para estruturar o OCR em JSON."""
+    """Usa Gemini (modo texto) para estruturar o OCR em JSON. Barato e rápido."""
     from google import genai
     for chave in LISTA_CHAVES_GEMINI:
         try:
             client  = genai.Client(api_key=chave)
-            modelos = client.models.list()
-            modelo  = next(
-                (m.name.split('/')[-1] for m in modelos
-                 if '2.5-flash' in m.name.lower() and '8b' not in m.name.lower()),
-                "gemini-1.5-flash"
-            )
+            modelo  = _listar_modelo_disponivel(client, chave)
+            log(f"   🤖 Gemini texto: {modelo}", Fore.WHITE)
             r = client.models.generate_content(
                 model=modelo,
                 contents=[PROMPT_PARSE + texto_ocr]
@@ -159,47 +164,61 @@ def parse_texto_com_gemini(texto_ocr: str) -> dict | None:
     return None
 
 
+def corrigir_ano(dados: dict) -> dict:
+    """
+    Camada 3 de proteção: força correção do ano se OCR/IA ainda errou.
+    Substitui anos impossíveis (2020, 2021, 2022, 2023, 2025, 2028, 2029) pelo ano atual.
+    """
+    data_str = dados.get("data", "")
+    if data_str and len(data_str) >= 4:
+        ano_str = data_str[:4]
+        anos_errados = {"2020", "2021", "2022", "2023", "2025", "2028", "2029"}
+        if ano_str in anos_errados:
+            dados["data"] = str(ANO_ATUAL) + data_str[4:]
+            log(f"   🔧 Ano corrigido: {ano_str} → {ANO_ATUAL}", Fore.YELLOW)
+    return dados
+
+
 def extrair_dados(caminho: str) -> dict | None:
     """
-    Tenta OCR Tesseract → parse Gemini texto.
-    Fallback: Gemini Vision.
+    Pipeline de extração com 3 camadas anti-erro de OCR:
+    1. Tesseract (local, grátis) com contraste 2x
+    2. Gemini texto com prompt instruindo correção de ano
+    3. Gemini Vision como fallback final
     """
     log(f"   🔍 OCR Tesseract...", Fore.WHITE)
     texto = ocr_tesseract(caminho)
 
     if texto and texto_parece_cupom(texto):
-        log(f"   📝 OCR ok — parseando com Gemini texto...", Fore.WHITE)
+        log(f"   📝 OCR ok ({len(texto)} chars) — parseando com Gemini texto...", Fore.WHITE)
         dados = parse_texto_com_gemini(texto)
         if dados and dados.get("placa") and dados.get("litros"):
-            return dados
+            return corrigir_ano(dados)
         log(f"   ⚠️ Parse texto insuficiente — usando Gemini Vision...", Fore.YELLOW)
     else:
         log(f"   👁️ OCR fraco — usando Gemini Vision...", Fore.WHITE)
 
-    return _extrair_via_visao(caminho)
+    dados = _extrair_via_visao(caminho)
+    if dados:
+        dados = corrigir_ano(dados)
+    return dados
 
 
 # ── LIMPEZA ────────────────────────────────────────────────────────────────
 
 def limpar_pasta(ids_processados: set):
-    """
-    Remove arquivos da pasta de cupons que já foram processados
-    ou que são inúteis (muito pequenos, sem JSON par, etc.).
-    Mantém apenas os pendentes (json com processado=False).
-    """
+    """Remove imagens já processadas ou corrompidas da pasta de cupons."""
     if not os.path.exists(PASTA_CUPONS):
         return
 
     removidos = 0
     for f in Path(PASTA_CUPONS).glob("cupom_*"):
         try:
-            # Remove arquivos muito pequenos (provavelmente corrompidos)
             if f.suffix in ('.jpg', '.png', '.jpeg', '.webp') and f.stat().st_size < 5000:
                 f.unlink()
                 removidos += 1
                 continue
 
-            # Para imagens: verifica se o JSON par diz "processado: true"
             if f.suffix in ('.jpg', '.png', '.jpeg', '.webp'):
                 meta_path = f.with_suffix('.json')
                 if meta_path.exists():
@@ -210,12 +229,10 @@ def limpar_pasta(ids_processados: set):
                         meta_path.unlink()
                         removidos += 1
                 else:
-                    # Imagem sem JSON — verifica pelo hash no cache
                     hash_arq = hashlib.md5(f.read_bytes()).hexdigest()
                     if hash_arq in ids_processados:
                         f.unlink()
                         removidos += 1
-
         except Exception:
             pass
 
@@ -230,7 +247,7 @@ def executar_ciclo():
     print(Fore.BLUE + Style.BRIGHT + f"   🔄 ROBÔ 2 OCR+LANÇAMENTO — {datetime.now().strftime('%d/%m/%Y %H:%M')}")
     print(Fore.BLUE + Style.BRIGHT + "=" * 65 + "\n")
 
-    # Primeiro aciona o Robô 1 para baixar fotos novas
+    # Aciona o Robô 1 para baixar fotos novas
     log("📲 Acionando Robô 1 para baixar novas fotos...", Fore.YELLOW)
     try:
         import robo1_downloader_wa as r1
@@ -259,9 +276,9 @@ def executar_ciclo():
     log(f"📋 {len(pendentes)} cupom(ns) pendente(s) para processar.", Fore.CYAN)
 
     for meta_path, meta, img_path in pendentes:
-        arquivo  = str(img_path)
-        grupo    = meta.get('grupo', '')
-        id_msg   = meta.get('id_msg', '')
+        arquivo = str(img_path)
+        grupo   = meta.get('grupo', '')
+        id_msg  = meta.get('id_msg', '')
 
         log(f"\n🔍 {img_path.name} ({grupo})", Fore.YELLOW)
 
@@ -280,7 +297,6 @@ def executar_ciclo():
             if not dados:
                 entrada_log["erro"] = "Extração falhou (Gemini e OCR)"
                 salvar_log(entrada_log)
-                # Marca como processado para não ficar em loop
                 meta['processado'] = True
                 meta['erro'] = 'extracao_falhou'
                 with open(meta_path, 'w', encoding='utf-8') as f:
@@ -337,7 +353,7 @@ def executar_ciclo():
             if not forn_id and dados.get("posto_nome"):
                 forn_id = buscar_fornecedor_por_nome(api, dados["posto_nome"], dados.get("posto_cnpj", ""))
             if not forn_id:
-                entrada_log["erro"] = f"Fornecedor não encontrado"
+                entrada_log["erro"] = "Fornecedor não encontrado"
                 salvar_log(entrada_log)
                 erro += 1
                 continue
@@ -345,7 +361,7 @@ def executar_ciclo():
 
             comb_id = buscar_combustivel_id(api, dados.get("combustivel", ""))
             if not comb_id:
-                entrada_log["erro"] = f"Combustível não encontrado"
+                entrada_log["erro"] = "Combustível não encontrado"
                 salvar_log(entrada_log)
                 erro += 1
                 continue
@@ -414,7 +430,6 @@ def main():
 
 
 if __name__ == "__main__":
-    import sys
     if "--agora" in sys.argv:
         executar_ciclo()
     else:
